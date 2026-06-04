@@ -54,6 +54,8 @@ php bin/yandex-parser collect:websites \
   --location="Краснодар" \
   --queries="ресторан,кафе,стоматология,клиника,салон красоты,автосервис,отель" \
   --max-results-per-query=500 \
+  --checkpoint-interval=30 \
+  --checkpoint-every=25 \
   --output=krasnodar_websites.csv
 ```
 
@@ -68,8 +70,10 @@ php bin/yandex-parser collect:websites \
   --provider=direct \
   --location="Краснодар" \
   --queries="ресторан,кафе,стоматология,клиника,салон красоты,автосервис,отель" \
-  --max-results-per-query=100 \
+  --max-results-per-query=0 \
+  --max-pages-per-query=50 \
   --delay-ms=1000 \
+  --checkpoint-interval=30 \
   --output=krasnodar_websites_direct.csv
 ```
 
@@ -98,23 +102,27 @@ php bin/yandex-parser collect:websites \
   --location="Краснодар" \
   --queries-file=examples/queries-krasnodar.txt \
   --max-results-per-query=500 \
+  --checkpoint-interval=30 \
+  --checkpoint-every=25 \
   --output=krasnodar_websites.csv
 ```
 
 CSV содержит: `business_id`, `title`, `city`, `address`, `website`, `website_host`, `phone`, `rating`, `reviews`, `yandex_maps_url`.
 
-Во время работы CLI пишет progress-лог в STDERR: текущую рубрику, сколько URL карточек найдено, какую карточку сейчас открывает, какие организации сохранены, какие пропущены и какие оказались дублями. Если нужен тихий режим для cron/пайплайна, добавьте `--quiet`.
+Во время работы CLI пишет progress-лог в STDERR: текущую рубрику, сколько URL карточек найдено, какую карточку сейчас открывает, какие организации сохранены, какие пропущены и какие оказались дублями. Если нужен тихий режим для cron/пайплайна, добавьте `--quiet`. Чтобы CSV не терялся при ошибках, CLI периодически перезаписывает файл: `--checkpoint-interval=30` сохраняет не реже раза в 30 секунд, а `--checkpoint-every=25` — каждые 25 новых строк.
 
 Пример логов:
 
 ```text
-[12:00:01] [direct] query 1/7 started: "ресторан" in "Краснодар" (limit=100)
-[12:00:02] [direct] found 42 organization urls for "ресторан"
-[12:00:03] [direct] card 1/42: https://yandex.ru/maps/org/...
-[12:00:04] [direct] saved #1: Название организации — https://example.ru
+[12:00:01] [direct] query 1/7 started: "ресторан" in "Краснодар" (limit=unlimited)
+[12:00:02] [direct] page 1 loaded for "ресторан": urls=10, new=10, total=10
+[12:00:03] [direct] found 42 organization urls for "ресторан"
+[12:00:04] [direct] card 1/42: https://yandex.ru/maps/org/...
+[12:00:05] [direct] saved #1: Название организации — https://example.ru
+[12:00:06] checkpoint saved: krasnodar_websites_direct.csv (25 rows)
 ```
 
-> Важно: «все организации города» технически собираются как агрегация по рубрикам/запросам. Чем шире список рубрик, тем больше покрытие; CLI дедуплицирует карточки по `businessId`.
+> Важно: «все организации города» технически собираются как агрегация по рубрикам/запросам. Чем шире список рубрик, тем больше покрытие; CLI дедуплицирует карточки по `businessId`. Для direct-провайдера `--max-results-per-query=0` означает «без локального лимита»: CLI будет листать выдачу, пока не получит страницу без новых карточек или пока не достигнет safety-лимита `--max-pages-per-query`.
 
 ## Методы
 
@@ -177,7 +185,7 @@ foreach ($places as $place) {
 }
 ```
 
-> Важно: «все организации города» — это практическая агрегация по рубрикам/поисковым запросам. Чем шире список `queries`, тем полнее покрытие; один поисковый запрос обычно ограничен выдачей Яндекс Карт и настройкой `maxResultsPerQuery`.
+> Важно: «все организации города» — это практическая агрегация по рубрикам/поисковым запросам. Чем шире список `queries`, тем полнее покрытие; один поисковый запрос обычно ограничен выдачей Яндекс Карт и настройками `maxResultsPerQuery` / `--max-pages-per-query`.
 
 ### Отзывы (Яндекс Карты)
 

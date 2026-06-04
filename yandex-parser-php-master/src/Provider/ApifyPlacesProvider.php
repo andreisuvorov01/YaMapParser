@@ -28,6 +28,9 @@ final readonly class ApifyPlacesProvider implements PlacesWithWebsitesProvider
         array $options = [],
         ?callable $logger = null,
     ): array {
+        $actorOptions = $options;
+        unset($actorOptions['maxPagesPerQuery']);
+
         /** @var array<string, Place> $placesByKey */
         $placesByKey = [];
 
@@ -47,7 +50,7 @@ final readonly class ApifyPlacesProvider implements PlacesWithWebsitesProvider
                 location: $location,
                 maxResults: $maxResultsPerQuery,
                 language: $language,
-                options: $options,
+                options: $actorOptions,
             );
 
             $this->log($logger, 'query.finished', [
@@ -79,6 +82,7 @@ final readonly class ApifyPlacesProvider implements PlacesWithWebsitesProvider
                     'title' => $place->title,
                     'website' => $place->website,
                     'totalSaved' => count($placesByKey),
+                    'place' => $place,
                 ]);
             }
         }

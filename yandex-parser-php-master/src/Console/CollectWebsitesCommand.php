@@ -76,18 +76,32 @@ final class CollectWebsitesCommand
         $maxResultsPerQuery = (int) $options['max-results-per-query'];
         $language = $this->resolveLanguage((string) $options['language']);
         $provider = $this->makeProvider($providerName, $options);
-        $logger = $this->makeLogger((bool) $options['quiet']);
+        $checkpointInterval = (int) $options['checkpoint-interval'];
+        $checkpointEvery = (int) $options['checkpoint-every'];
+        /** @var array<string, Place> $checkpointPlacesByKey */
+        $checkpointPlacesByKey = [];
+        $lastCheckpointAt = time();
+        $logger = $this->makeLogger(
+            quiet: (bool) $options['quiet'],
+            checkpointPath: $output,
+            checkpointInterval: $checkpointInterval,
+            checkpointEvery: $checkpointEvery,
+            checkpointPlacesByKey: $checkpointPlacesByKey,
+            lastCheckpointAt: $lastCheckpointAt,
+        );
 
         if ($provider === null) {
             return 1;
         }
 
         $this->stdout(sprintf(
-            "Collecting organizations with websites: provider=%s, location=%s, queries=%d, maxResultsPerQuery=%d\n",
+            "Collecting organizations with websites: provider=%s, location=%s, queries=%d, maxResultsPerQuery=%s, checkpointInterval=%ds, checkpointEvery=%d\n",
             $providerName,
             $location,
             count($queries),
-            $maxResultsPerQuery,
+            $this->formatLimit($maxResultsPerQuery),
+            $checkpointInterval,
+            $checkpointEvery,
         ));
 
         try {
@@ -102,6 +116,15 @@ final class CollectWebsitesCommand
 
             $this->writeCsv($output, $places);
         } catch (\Throwable $e) {
+            if (count($checkpointPlacesByKey) > 0) {
+                $this->writeCsv($output, array_values($checkpointPlacesByKey));
+                $this->stderr(sprintf(
+                    "Checkpoint saved after error: %s (%d rows)\n",
+                    $output,
+                    count($checkpointPlacesByKey),
+                ));
+            }
+
             $this->stderr($e->getMessage()."\n");
 
             return 1;
@@ -129,6 +152,9 @@ final class CollectWebsitesCommand
             'language' => 'ru',
             'timeout' => 900,
             'delay-ms' => 750,
+            'max-pages-per-query' => 50,
+            'checkpoint-interval' => 30,
+            'checkpoint-every' => 25,
             'filter-rating' => null,
             'max-photos' => 0,
             'max-posts' => 0,
@@ -160,7 +186,7 @@ final class CollectWebsitesCommand
             }
         }
 
-        foreach (['max-results-per-query', 'timeout', 'delay-ms', 'max-photos', 'max-posts'] as $integerOption) {
+        foreach (['max-results-per-query', 'timeout', 'delay-ms', 'max-pages-per-query', 'checkpoint-interval', 'checkpoint-every', 'max-photos', 'max-posts'] as $integerOption) {
             $options[$integerOption] = max(0, (int) $options[$integerOption]);
         }
 
@@ -247,6 +273,7 @@ final class CollectWebsitesCommand
         $actorOptions = [
             'maxPhotos' => (int) $options['max-photos'],
             'maxPosts' => (int) $options['max-posts'],
+            'maxPagesPerQuery' => (int) $options['max-pages-per-query'],
         ];
 
         if ($options['filter-rating'] !== null && $options['filter-rating'] !== '') {
@@ -257,16 +284,63 @@ final class CollectWebsitesCommand
     }
 
     /**
+     * @param  array<string, Place>  $checkpointPlacesByKey
      * @return callable(string, array<string, mixed>): void|null
      */
-    private function makeLogger(bool $quiet): ?callable
-    {
-        if ($quiet) {
+    private function makeLogger(
+        bool $quiet,
+        string $checkpointPath,
+        int $checkpointInterval,
+        int $checkpointEvery,
+        array &$checkpointPlacesByKey,
+        int &$lastCheckpointAt,
+    ): ?callable {
+        if ($quiet && $checkpointInterval <= 0 && $checkpointEvery <= 0) {
             return null;
         }
 
-        return function (string $event, array $context): void {
-            $this->stderr($this->formatLogLine($event, $context)."\n");
+        return function (string $event, array $context) use (
+            $quiet,
+            $checkpointPath,
+            $checkpointInterval,
+            $checkpointEvery,
+            &$checkpointPlacesByKey,
+            &$lastCheckpointAt,
+        ): void {
+            if (! $quiet) {
+                $this->stderr($this->formatLogLine($event, $context)."\n");
+            }
+
+            if ($event !== 'place.saved' || ! ($context['place'] ?? null) instanceof Place) {
+                return;
+            }
+
+            /** @var Place $place */
+            $place = $context['place'];
+            $key = $place->businessId !== ''
+                ? $place->businessId
+                : md5($place->title.'|'.$place->address.'|'.$place->website);
+            $checkpointPlacesByKey[$key] = $place;
+
+            $now = time();
+            $shouldSaveByRows = $checkpointEvery > 0 && count($checkpointPlacesByKey) % $checkpointEvery === 0;
+            $shouldSaveByTime = $checkpointInterval > 0 && ($now - $lastCheckpointAt) >= $checkpointInterval;
+
+            if (! $shouldSaveByRows && ! $shouldSaveByTime) {
+                return;
+            }
+
+            $this->writeCsv($checkpointPath, array_values($checkpointPlacesByKey));
+            $lastCheckpointAt = $now;
+
+            if (! $quiet) {
+                $this->stderr(sprintf(
+                    "[%s] checkpoint saved: %s (%d rows)\n",
+                    date('H:i:s'),
+                    $checkpointPath,
+                    count($checkpointPlacesByKey),
+                ));
+            }
         };
     }
 
@@ -279,20 +353,29 @@ final class CollectWebsitesCommand
 
         return match ($event) {
             'query.started' => sprintf(
-                '[%s] [%s] query %d/%d started: "%s" in "%s" (limit=%d)',
+                '[%s] [%s] query %d/%d started: "%s" in "%s" (limit=%s)',
                 $time,
                 (string) ($context['provider'] ?? 'provider'),
                 (int) ($context['queryNumber'] ?? 0),
                 (int) ($context['queryTotal'] ?? 0),
                 (string) ($context['query'] ?? ''),
                 (string) ($context['location'] ?? ''),
-                (int) ($context['maxResults'] ?? 0),
+                $this->formatLimit((int) ($context['maxResults'] ?? 0)),
             ),
             'query.urls_found' => sprintf(
                 '[%s] [direct] found %d organization urls for "%s"',
                 $time,
                 (int) ($context['urlsFound'] ?? 0),
                 (string) ($context['query'] ?? ''),
+            ),
+            'query.page_loaded' => sprintf(
+                '[%s] [direct] page %d loaded for "%s": urls=%d, new=%d, total=%d',
+                $time,
+                (int) ($context['page'] ?? 0),
+                (string) ($context['query'] ?? ''),
+                (int) ($context['urlsOnPage'] ?? 0),
+                (int) ($context['newUrlsOnPage'] ?? 0),
+                (int) ($context['totalUrls'] ?? 0),
             ),
             'query.finished' => sprintf(
                 '[%s] [%s] query finished: "%s" (saved=%d, placesWithWebsites=%d)',
@@ -335,6 +418,11 @@ final class CollectWebsitesCommand
         };
     }
 
+    private function formatLimit(int $limit): string
+    {
+        return $limit <= 0 ? 'unlimited' : (string) $limit;
+    }
+
     /**
      * @param  Place[]  $places
      */
@@ -357,7 +445,7 @@ final class CollectWebsitesCommand
             'rating',
             'reviews',
             'yandex_maps_url',
-        ]);
+        ], ',', '"', '');
 
         foreach ($places as $place) {
             fputcsv($handle, [
@@ -371,7 +459,7 @@ final class CollectWebsitesCommand
                 $place->rating,
                 $place->reviewCount,
                 $place->url,
-            ]);
+            ], ',', '"', '');
         }
 
         fclose($handle);
@@ -394,7 +482,7 @@ Options:
   --location=Краснодар                City/location to search. Default: Краснодар
   --queries="ресторан,кафе"           Comma-separated rubrics/search queries.
   --queries-file=queries.txt          One query per line. Overrides default queries unless --queries is passed.
-  --max-results-per-query=300         Max results for each query/rubric. Default: 300
+  --max-results-per-query=300         Max results for each query/rubric; 0 means no local limit. Default: 300
   --output=krasnodar_websites.csv     CSV output path. Default: krasnodar_websites.csv
   --language=ru                       Yandex/actor language: auto, ru, en, tr, uk, kk. Default: ru
   --filter-rating=4.0                 Optional Apify places actor rating filter.
@@ -402,6 +490,9 @@ Options:
   --max-posts=0                       Optional Apify places actor maxPosts. Default: 0
   --timeout=900                       Apify waitForFinish timeout in seconds. Default: 900
   --delay-ms=750                      Direct provider delay between organization page requests. Default: 750
+  --max-pages-per-query=50            Direct provider page safety limit when max-results-per-query=0. Default: 50
+  --checkpoint-interval=30            Rewrite CSV checkpoint at least every N seconds; 0 disables time checkpoints. Default: 30
+  --checkpoint-every=25               Rewrite CSV checkpoint every N saved rows; 0 disables row checkpoints. Default: 25
   --quiet, -q                         Disable progress logs and print only final status/errors.
   --help                              Show this help.
 

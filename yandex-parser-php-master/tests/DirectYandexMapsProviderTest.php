@@ -127,7 +127,7 @@ HTML),
     $places = $provider->collect(
         queries: ['кафе'],
         location: 'Краснодар',
-        maxResultsPerQuery: 10,
+        maxResultsPerQuery: 1,
         logger: static function (string $event, array $context) use (&$events): void {
             $events[] = [$event, $context];
         },
@@ -140,4 +140,42 @@ HTML),
         ->and(array_column($events, 0))->toContain('place.saved')
         ->and(array_column($events, 0))->toContain('query.finished')
         ->and($events[3][1]['website'])->toBe('https://www.service-example.ru/contacts');
+});
+
+it('loads direct result pages until an empty page when query limit is unlimited', function () {
+    $mock = new MockHandler([
+        new Response(200, [], '<a href="/maps/org/place_one/111111/">One</a>'),
+        new Response(200, [], '<a href="/maps/org/place_two/222222/">Two</a>'),
+        new Response(200, [], '<html>No more places</html>'),
+        new Response(200, [], '<script>{"website":"https:\/\/one.example.ru","address":"Addr 1"}</script><title>One</title>'),
+        new Response(200, [], '<script>{"website":"https:\/\/two.example.ru","address":"Addr 2"}</script><title>Two</title>'),
+    ]);
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => HandlerStack::create($mock),
+        ]),
+        delayMs: 0,
+    );
+    $events = [];
+
+    $places = $provider->collect(
+        queries: ['кафе'],
+        location: 'Краснодар',
+        maxResultsPerQuery: 0,
+        options: ['maxPagesPerQuery' => 5],
+        logger: static function (string $event, array $context) use (&$events): void {
+            $events[] = [$event, $context];
+        },
+    );
+
+    $pageEvents = array_values(array_filter($events, static fn (array $event): bool => $event[0] === 'query.page_loaded'));
+
+    expect($places)->toHaveCount(2)
+        ->and(array_map(static fn ($place): ?string => $place->website, $places))->toBe(['https://one.example.ru', 'https://two.example.ru'])
+        ->and($pageEvents)->toHaveCount(3)
+        ->and($pageEvents[0][1]['newUrlsOnPage'])->toBe(1)
+        ->and($pageEvents[1][1]['newUrlsOnPage'])->toBe(1)
+        ->and($pageEvents[2][1]['newUrlsOnPage'])->toBe(0);
 });

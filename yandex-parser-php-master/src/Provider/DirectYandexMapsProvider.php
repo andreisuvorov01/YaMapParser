@@ -52,7 +52,8 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         array $options = [],
         ?callable $logger = null,
     ): array {
-        unset($language, $options);
+        unset($language);
+        $maxPagesPerQuery = max(1, (int) ($options['maxPagesPerQuery'] ?? 50));
 
         /** @var array<string, Place> $placesByKey */
         $placesByKey = [];
@@ -66,9 +67,10 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
                 'queryTotal' => count($queries),
                 'location' => $location,
                 'maxResults' => $maxResultsPerQuery,
+                'maxPages' => $maxPagesPerQuery,
             ]);
 
-            $urls = $this->findOrganizationUrls($query, $location, $maxResultsPerQuery);
+            $urls = $this->findOrganizationUrls($query, $location, $maxResultsPerQuery, $maxPagesPerQuery, $logger);
             $this->log($logger, 'query.urls_found', [
                 'provider' => 'direct',
                 'query' => $query,
@@ -120,6 +122,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
                     'title' => $place->title,
                     'website' => $place->website,
                     'totalSaved' => count($placesByKey),
+                    'place' => $place,
                 ]);
                 $this->sleepBetweenRequests();
             }
@@ -139,20 +142,63 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
      *
      * @throws ApiException
      */
-    private function findOrganizationUrls(string $query, string $location, int $maxResults): array
-    {
-        try {
-            $response = $this->http->request('GET', '/maps/', [
-                'query' => ['text' => trim($query.' '.$location)],
+    private function findOrganizationUrls(
+        string $query,
+        string $location,
+        int $maxResults,
+        int $maxPages,
+        ?callable $logger,
+    ): array {
+        $urls = [];
+        $seenUrls = [];
+        $unlimited = $maxResults <= 0;
+
+        for ($page = 1; $page <= $maxPages; $page++) {
+            try {
+                $queryParams = ['text' => trim($query.' '.$location)];
+                if ($page > 1) {
+                    $queryParams['page'] = $page;
+                }
+
+                $response = $this->http->request('GET', '/maps/', [
+                    'query' => $queryParams,
+                ]);
+            } catch (GuzzleException $e) {
+                throw new ApiException('Direct Yandex Maps search request failed: '.$e->getMessage(), 0, $e);
+            }
+
+            $pageUrls = $this->extractOrganizationUrls((string) $response->getBody());
+            $newOnPage = 0;
+
+            foreach ($pageUrls as $url) {
+                if (isset($seenUrls[$url])) {
+                    continue;
+                }
+
+                $seenUrls[$url] = true;
+                $urls[] = $url;
+                $newOnPage++;
+
+                if (! $unlimited && count($urls) >= $maxResults) {
+                    break 2;
+                }
+            }
+
+            $this->log($logger, 'query.page_loaded', [
+                'provider' => 'direct',
+                'query' => $query,
+                'page' => $page,
+                'urlsOnPage' => count($pageUrls),
+                'newUrlsOnPage' => $newOnPage,
+                'totalUrls' => count($urls),
             ]);
-        } catch (GuzzleException $e) {
-            throw new ApiException('Direct Yandex Maps search request failed: '.$e->getMessage(), 0, $e);
+
+            if ($newOnPage === 0) {
+                break;
+            }
         }
 
-        $html = (string) $response->getBody();
-        $urls = $this->extractOrganizationUrls($html);
-
-        return array_slice($urls, 0, $maxResults);
+        return $urls;
     }
 
     private function fetchPlace(string $url, string $location): ?Place
