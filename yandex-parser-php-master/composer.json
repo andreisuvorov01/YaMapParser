@@ -1,6 +1,6 @@
 {
     "name": "scraper-apis/yandex-parser",
-    "description": "PHP client library for scraping Yandex data (places, reviews, market products) using Apify actors",
+    "description": "PHP client library for scraping Yandex data (Maps places and reviews, Market products, Realty listings) using Apify actors",
     "type": "library",
     "license": "MIT",
     "require": {
@@ -33,5 +33,8 @@
         "allow-plugins": {
             "pestphp/pest-plugin": true
         }
-    }
+    },
+    "bin": [
+        "bin/yandex-parser"
+    ]
 }
