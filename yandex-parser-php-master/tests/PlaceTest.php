@@ -236,3 +236,29 @@ it('returns false for hasVideos when video count is 0', function () {
 
     expect($place->hasVideos())->toBeFalse();
 });
+
+it('gets normalized website host', function () {
+    $place = Place::fromArray(getSamplePlaceData());
+
+    expect($place->getWebsiteHost())->toBe('cafe-pushkin.ru');
+});
+
+it('gets normalized website host when scheme is missing', function () {
+    $data = getSamplePlaceData();
+    $data['website'] = 'www.example.com/path?utm=1';
+
+    $place = Place::fromArray($data);
+
+    expect($place->hasWebsite())->toBeTrue()
+        ->and($place->getWebsiteHost())->toBe('example.com');
+});
+
+it('returns false for blank website', function () {
+    $data = getSamplePlaceData();
+    $data['website'] = '   ';
+
+    $place = Place::fromArray($data);
+
+    expect($place->hasWebsite())->toBeFalse()
+        ->and($place->getWebsiteHost())->toBeNull();
+});
