@@ -1,0 +1,196 @@
+# Yandex Parser PHP
+
+[English](https://github.com/Scraper-APIs/yandex-scraper-php) | **Русский**
+
+PHP-библиотека для парсинга данных Яндекса: организации и места (Яндекс Карты), отзывы (Яндекс Карты), товары (Яндекс Маркет), недвижимость (Яндекс Недвижимость).
+
+Работает через [Apify API](https://apify.com/) — запускает акторы и возвращает типизированные DTO.
+
+## Установка
+
+```bash
+composer require scraper-apis/yandex-parser
+```
+
+## Быстрый старт
+
+```php
+use YandexParser\Client;
+
+$client = new Client('apify_api_ваш_токен');
+
+// Поиск ресторанов в Москве
+$places = $client->scrapePlaces(
+    query: ['ресторан'],
+    location: 'Москва',
+    maxResults: 50,
+);
+
+foreach ($places as $place) {
+    echo "{$place->title} — {$place->address}" . PHP_EOL;
+    echo "Рейтинг: {$place->rating}, отзывов: {$place->reviewCount}" . PHP_EOL;
+
+    if ($place->hasContactInfo()) {
+        echo "Тел: {$place->getFirstPhone()}" . PHP_EOL;
+    }
+}
+```
+
+## Методы
+
+### Организации (Яндекс Карты)
+
+```php
+use YandexParser\Language;
+
+$places = $client->scrapePlaces(
+    query: ['стоматология', 'клиника'],
+    location: 'Санкт-Петербург',
+    maxResults: 200,
+    language: Language::Russian,
+    options: [
+        'filterRating' => 4.5,
+        'filterOpenNow' => true,
+        'filterCardPayment' => true,
+        'maxPhotos' => 5,
+    ],
+);
+```
+
+### Отзывы (Яндекс Карты)
+
+```php
+use YandexParser\ReviewSort;
+
+$reviews = $client->scrapeReviews(
+    startUrls: ['https://yandex.ru/maps/org/pushkin/1124715036/'],
+    maxReviewsPerPlace: 100,
+    reviewSort: ReviewSort::Newest,
+    minRating: 1,
+    maxRating: 3,
+);
+
+foreach ($reviews as $review) {
+    echo "{$review->authorName}: {$review->rating}/5" . PHP_EOL;
+
+    if ($review->hasBusinessReply()) {
+        echo "Ответ: {$review->getBusinessReplyText()}" . PHP_EOL;
+    }
+}
+```
+
+### Товары (Яндекс Маркет)
+
+```php
+use YandexParser\MarketSort;
+use YandexParser\MarketRegion;
+
+$products = $client->scrapeProducts(
+    query: 'ноутбук ASUS',
+    maxItems: 50,
+    region: MarketRegion::Moscow,
+    sort: MarketSort::PriceAsc,
+    options: [
+        'priceFrom' => 30000,
+        'priceTo' => 80000,
+    ],
+);
+
+foreach ($products as $product) {
+    echo "{$product->title} — {$product->getPriceFormatted()}" . PHP_EOL;
+    echo "Продавец: {$product->sellerName}, рейтинг: {$product->rating}" . PHP_EOL;
+
+    $discount = $product->getYaBankDiscount();
+    if ($discount !== null) {
+        echo "Скидка по Я.Банку: {$discount}%" . PHP_EOL;
+    }
+}
+```
+
+### Недвижимость (Яндекс Недвижимость)
+
+```php
+use YandexParser\DealType;
+use YandexParser\PropertyCategory;
+use YandexParser\RealtySort;
+
+$listings = $client->scrapeListings(
+    location: 'Москва',
+    dealType: DealType::Sell,
+    category: PropertyCategory::Apartment,
+    maxItems: 50,
+    sort: RealtySort::PriceAsc,
+    roomsTotal: ['1', '2'],
+    options: [
+        'priceMin' => 5000000,
+        'priceMax' => 15000000,
+    ],
+);
+
+foreach ($listings as $listing) {
+    echo "{$listing->getAddress()} — {$listing->getPriceValue()} ₽" . PHP_EOL;
+    echo "Площадь: {$listing->getAreaValue()} м², этаж: {$listing->floorsOffered[0] ?? '?'}/{$listing->floorsTotal}" . PHP_EOL;
+
+    if ($listing->hasPhones()) {
+        echo "Тел: {$listing->getFirstPhone()}" . PHP_EOL;
+    }
+
+    if (!$listing->isFromOwner()) {
+        echo "Агентство: {$listing->getSellerName()}" . PHP_EOL;
+    }
+}
+```
+
+## Перечисления
+
+| Enum | Значения |
+|------|----------|
+| `Language` | `Auto`, `Russian`, `English`, `Turkish`, `Ukrainian`, `Kazakh` |
+| `ReviewSort` | `Relevance`, `Newest`, `Highest`, `Lowest` |
+| `MarketSort` | `Default`, `Popular`, `PriceAsc`, `PriceDesc`, `Rating` |
+| `MarketRegion` | `Moscow`, `SaintPetersburg`, `Yekaterinburg`, `Kazan`, `Novosibirsk`, `NizhnyNovgorod`, `Samara`, `RostovOnDon`, `Krasnodar`, `Chelyabinsk`, `Ufa`, `Perm`, `Voronezh`, `Volgograd`, `Krasnoyarsk`, `Omsk` |
+| `DealType` | `Sell`, `Rent` |
+| `PropertyCategory` | `Apartment`, `Rooms`, `House`, `Lot`, `Commercial`, `Garage` |
+| `RealtySort` | `Relevance`, `Newest`, `PriceAsc`, `PriceDesc`, `AreaAsc`, `AreaDesc`, `CommissioningDate` |
+
+## Конфигурация
+
+```php
+use YandexParser\Client;
+use YandexParser\Config;
+
+// Изменить таймаут или базовый URL
+$client = new Client('токен', new Config(
+    apiToken: 'токен',
+    timeout: 600,
+));
+```
+
+## Обработка ошибок
+
+```php
+use YandexParser\Exception\ApiException;
+use YandexParser\Exception\RateLimitException;
+
+try {
+    $places = $client->scrapePlaces(query: ['кафе'], location: 'Казань');
+} catch (RateLimitException $e) {
+    sleep($e->retryAfter);
+    // повторить запрос
+} catch (ApiException $e) {
+    echo "Ошибка API: {$e->getMessage()}" . PHP_EOL;
+}
+```
+
+## Требования
+
+- PHP 8.3+
+- Токен [Apify API](https://console.apify.com/account/integrations)
+
+## См. также
+
+- [2GIS Parser PHP](https://github.com/Scraper-APIs/2gis-parser-php) — парсинг 2ГИС (организации и отзывы, недвижимость, вакансии)
+
+## Лицензия
+
+MIT
