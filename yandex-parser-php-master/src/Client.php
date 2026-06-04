@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace YandexParser;
 
 use GuzzleHttp\Client as HttpClient;
+use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\GuzzleException;
 use YandexParser\DTO\Listing;
 use YandexParser\DTO\Place;
@@ -15,14 +16,17 @@ use YandexParser\Exception\RateLimitException;
 
 final class Client
 {
-    private HttpClient $http;
+    private ClientInterface $http;
 
     private Config $config;
 
-    public function __construct(string $apiToken, ?Config $config = null)
-    {
+    public function __construct(
+        string $apiToken,
+        ?Config $config = null,
+        ?ClientInterface $http = null,
+    ) {
         $this->config = $config ?? new Config($apiToken);
-        $this->http = new HttpClient([
+        $this->http = $http ?? new HttpClient([
             'base_uri' => $this->config->baseUrl,
             'timeout' => $this->config->timeout,
             'headers' => [
@@ -71,6 +75,84 @@ final class Client
         } catch (GuzzleException $e) {
             $this->handleGuzzleException($e);
         }
+    }
+
+    /**
+     * Scrape places/businesses from Yandex Maps and keep only cards that expose a website.
+     *
+     * This is useful for lead lists such as all Milan, Prague or Krasnodar businesses
+     * that have their own website in the Yandex Maps card. For broader coverage, use
+     * collectPlacesWithWebsites() to run several rubrics/search queries and de-duplicate them.
+     *
+     * @param  string[]  $query  Search queries or rubrics
+     * @param  array<string, mixed>  $options  Optional places actor filters
+     * @return Place[]
+     *
+     * @throws ApiException
+     * @throws RateLimitException
+     */
+    public function scrapePlacesWithWebsites(
+        array $query = ['organization'],
+        string $location = 'Moscow',
+        int $maxResults = 100,
+        Language $language = Language::Auto,
+        array $options = [],
+    ): array {
+        $options += ['enrichBusinessData' => true];
+
+        $places = $this->scrapePlaces(
+            query: $query,
+            location: $location,
+            maxResults: $maxResults,
+            language: $language,
+            options: $options,
+        );
+
+        return array_values(array_filter(
+            $places,
+            static fn (Place $place): bool => $place->hasWebsite(),
+        ));
+    }
+
+    /**
+     * Run several Yandex Maps searches and return a de-duplicated list of places with websites.
+     *
+     * @param  string[]  $queries  Search queries or rubrics; each query is executed as a separate actor run
+     * @param  array<string, mixed>  $options  Optional places actor filters
+     * @return Place[]
+     *
+     * @throws ApiException
+     * @throws RateLimitException
+     */
+    public function collectPlacesWithWebsites(
+        array $queries,
+        string $location,
+        int $maxResultsPerQuery = 100,
+        Language $language = Language::Auto,
+        array $options = [],
+    ): array {
+        /** @var array<string, Place> $placesByKey */
+        $placesByKey = [];
+
+        foreach ($queries as $query) {
+            $places = $this->scrapePlacesWithWebsites(
+                query: [(string) $query],
+                location: $location,
+                maxResults: $maxResultsPerQuery,
+                language: $language,
+                options: $options,
+            );
+
+            foreach ($places as $place) {
+                $key = $place->businessId !== ''
+                    ? $place->businessId
+                    : md5($place->title.'|'.$place->address.'|'.$place->website);
+
+                $placesByKey[$key] = $place;
+            }
+        }
+
+        return array_values($placesByKey);
     }
 
     /**
@@ -233,7 +315,7 @@ final class Client
      */
     private function runActor(string $actorId, array $input): array
     {
-        $response = $this->http->post("/acts/{$actorId}/runs", [
+        $response = $this->http->request('POST', "/acts/{$actorId}/runs", [
             'json' => $input,
             'query' => ['waitForFinish' => $this->config->timeout],
         ]);
@@ -261,7 +343,7 @@ final class Client
     private function fetchDataset(string $datasetId): array
     {
         try {
-            $response = $this->http->get("/datasets/{$datasetId}/items");
+            $response = $this->http->request('GET', "/datasets/{$datasetId}/items");
 
             /** @var array<int, array<string, mixed>> $items */
             $items = json_decode($response->getBody()->getContents(), true);

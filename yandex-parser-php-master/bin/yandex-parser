@@ -1,0 +1,56 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+$autoloadPaths = [
+    __DIR__.'/../vendor/autoload.php',
+    __DIR__.'/../../../autoload.php',
+];
+
+$autoloadLoaded = false;
+foreach ($autoloadPaths as $autoloadPath) {
+    if (is_file($autoloadPath)) {
+        require $autoloadPath;
+        $autoloadLoaded = true;
+        break;
+    }
+}
+
+if (! $autoloadLoaded) {
+    spl_autoload_register(static function (string $class): void {
+        $prefix = 'YandexParser\\';
+        if (! str_starts_with($class, $prefix)) {
+            return;
+        }
+
+        $relativeClass = substr($class, strlen($prefix));
+        $path = __DIR__.'/../src/'.str_replace('\\', '/', $relativeClass).'.php';
+
+        if (is_file($path)) {
+            require $path;
+        }
+    });
+}
+
+if (! class_exists(YandexParser\Console\CollectWebsitesCommand::class)) {
+    fwrite(STDERR, "Autoloader not found. Run composer install first.\n");
+    exit(1);
+}
+
+$command = $argv[1] ?? 'collect:websites';
+
+if ($command === 'collect:websites') {
+    $arguments = $argv;
+    unset($arguments[1]);
+    $arguments = array_values($arguments);
+
+    exit((new YandexParser\Console\CollectWebsitesCommand())->run($arguments));
+}
+
+if ($command === '--help' || $command === '-h') {
+    exit((new YandexParser\Console\CollectWebsitesCommand())->run([$argv[0], '--help']));
+}
+
+fwrite(STDERR, "Unknown command: {$command}\nRun with --help for usage.\n");
+exit(1);
