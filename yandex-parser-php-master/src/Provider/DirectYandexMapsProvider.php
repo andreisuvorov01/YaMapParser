@@ -39,6 +39,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
     /**
      * @param  string[]  $queries
      * @param  array<string, mixed>  $options
+     * @param  callable(string, array<string, mixed>): void|null  $logger
      * @return Place[]
      *
      * @throws ApiException
@@ -49,19 +50,50 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         int $maxResultsPerQuery = 100,
         Language $language = Language::Auto,
         array $options = [],
+        ?callable $logger = null,
     ): array {
         unset($language, $options);
 
         /** @var array<string, Place> $placesByKey */
         $placesByKey = [];
 
-        foreach ($queries as $query) {
-            $urls = $this->findOrganizationUrls((string) $query, $location, $maxResultsPerQuery);
+        foreach ($queries as $index => $query) {
+            $query = (string) $query;
+            $this->log($logger, 'query.started', [
+                'provider' => 'direct',
+                'query' => $query,
+                'queryNumber' => $index + 1,
+                'queryTotal' => count($queries),
+                'location' => $location,
+                'maxResults' => $maxResultsPerQuery,
+            ]);
 
-            foreach ($urls as $url) {
+            $urls = $this->findOrganizationUrls($query, $location, $maxResultsPerQuery);
+            $this->log($logger, 'query.urls_found', [
+                'provider' => 'direct',
+                'query' => $query,
+                'urlsFound' => count($urls),
+            ]);
+
+            foreach ($urls as $urlIndex => $url) {
+                $this->log($logger, 'place.fetching', [
+                    'provider' => 'direct',
+                    'query' => $query,
+                    'urlNumber' => $urlIndex + 1,
+                    'urlTotal' => count($urls),
+                    'url' => $url,
+                ]);
+
                 $place = $this->fetchPlace($url, $location);
 
                 if ($place === null || ! $place->hasWebsite()) {
+                    $this->log($logger, 'place.skipped', [
+                        'provider' => 'direct',
+                        'query' => $query,
+                        'url' => $url,
+                        'reason' => 'no website or fetch failed',
+                    ]);
+
                     continue;
                 }
 
@@ -69,9 +101,34 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
                     ? $place->businessId
                     : md5($place->title.'|'.$place->address.'|'.$place->website);
 
+                if (isset($placesByKey[$key])) {
+                    $this->log($logger, 'place.duplicate', [
+                        'provider' => 'direct',
+                        'query' => $query,
+                        'title' => $place->title,
+                        'businessId' => $place->businessId,
+                    ]);
+                    $this->sleepBetweenRequests();
+
+                    continue;
+                }
+
                 $placesByKey[$key] = $place;
+                $this->log($logger, 'place.saved', [
+                    'provider' => 'direct',
+                    'query' => $query,
+                    'title' => $place->title,
+                    'website' => $place->website,
+                    'totalSaved' => count($placesByKey),
+                ]);
                 $this->sleepBetweenRequests();
             }
+
+            $this->log($logger, 'query.finished', [
+                'provider' => 'direct',
+                'query' => $query,
+                'totalSaved' => count($placesByKey),
+            ]);
         }
 
         return array_values($placesByKey);
@@ -354,6 +411,17 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         }
 
         return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $context
+     * @param  callable(string, array<string, mixed>): void|null  $logger
+     */
+    private function log(?callable $logger, string $event, array $context = []): void
+    {
+        if ($logger !== null) {
+            $logger($event, $context);
+        }
     }
 
     private function sleepBetweenRequests(): void

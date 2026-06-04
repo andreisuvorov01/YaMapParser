@@ -103,6 +103,17 @@ php bin/yandex-parser collect:websites \
 
 CSV содержит: `business_id`, `title`, `city`, `address`, `website`, `website_host`, `phone`, `rating`, `reviews`, `yandex_maps_url`.
 
+Во время работы CLI пишет progress-лог в STDERR: текущую рубрику, сколько URL карточек найдено, какую карточку сейчас открывает, какие организации сохранены, какие пропущены и какие оказались дублями. Если нужен тихий режим для cron/пайплайна, добавьте `--quiet`.
+
+Пример логов:
+
+```text
+[12:00:01] [direct] query 1/7 started: "ресторан" in "Краснодар" (limit=100)
+[12:00:02] [direct] found 42 organization urls for "ресторан"
+[12:00:03] [direct] card 1/42: https://yandex.ru/maps/org/...
+[12:00:04] [direct] saved #1: Название организации — https://example.ru
+```
+
 > Важно: «все организации города» технически собираются как агрегация по рубрикам/запросам. Чем шире список рубрик, тем больше покрытие; CLI дедуплицирует карточки по `businessId`.
 
 ## Методы

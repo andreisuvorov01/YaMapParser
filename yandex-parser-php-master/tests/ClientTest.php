@@ -11,6 +11,7 @@ use YandexParser\Client;
 use YandexParser\Config;
 use YandexParser\DTO\Place;
 use YandexParser\Language;
+use YandexParser\Provider\ApifyPlacesProvider;
 
 function makeMockedClient(array $responses, array &$history): Client
 {
@@ -134,4 +135,31 @@ it('collects places with websites from several queries and deduplicates by busin
         ->and($firstInput['location'])->toBe('Краснодар')
         ->and($firstInput['maxResults'])->toBe(25)
         ->and($secondInput['query'])->toBe(['hotel']);
+});
+
+it('emits progress logs while collecting Apify places with websites', function () {
+    $history = [];
+    $place = getSamplePlaceData();
+
+    $client = makeMockedClient([
+        new Response(200, [], json_encode(['data' => ['defaultDatasetId' => 'dataset-1']], JSON_THROW_ON_ERROR)),
+        new Response(200, [], json_encode([$place], JSON_THROW_ON_ERROR)),
+    ], $history);
+    $provider = new ApifyPlacesProvider($client);
+    $events = [];
+
+    $places = $provider->collect(
+        queries: ['ресторан'],
+        location: 'Краснодар',
+        maxResultsPerQuery: 10,
+        logger: static function (string $event, array $context) use (&$events): void {
+            $events[] = [$event, $context];
+        },
+    );
+
+    expect($places)->toHaveCount(1)
+        ->and(array_column($events, 0))->toBe(['query.started', 'query.finished', 'place.saved'])
+        ->and($events[0][1]['provider'])->toBe('apify')
+        ->and($events[0][1]['query'])->toBe('ресторан')
+        ->and($events[2][1]['website'])->toBe('https://cafe-pushkin.ru');
 });

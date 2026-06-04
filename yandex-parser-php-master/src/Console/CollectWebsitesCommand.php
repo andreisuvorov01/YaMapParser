@@ -76,6 +76,7 @@ final class CollectWebsitesCommand
         $maxResultsPerQuery = (int) $options['max-results-per-query'];
         $language = $this->resolveLanguage((string) $options['language']);
         $provider = $this->makeProvider($providerName, $options);
+        $logger = $this->makeLogger((bool) $options['quiet']);
 
         if ($provider === null) {
             return 1;
@@ -96,6 +97,7 @@ final class CollectWebsitesCommand
                 maxResultsPerQuery: $maxResultsPerQuery,
                 language: $language,
                 options: $this->resolveActorOptions($options),
+                logger: $logger,
             );
 
             $this->writeCsv($output, $places);
@@ -130,12 +132,19 @@ final class CollectWebsitesCommand
             'filter-rating' => null,
             'max-photos' => 0,
             'max-posts' => 0,
+            'quiet' => false,
             'help' => false,
         ];
 
         foreach (array_slice($argv, 1) as $argument) {
             if ($argument === '--help' || $argument === '-h') {
                 $options['help'] = true;
+
+                continue;
+            }
+
+            if ($argument === '--quiet' || $argument === '-q') {
+                $options['quiet'] = true;
 
                 continue;
             }
@@ -248,6 +257,85 @@ final class CollectWebsitesCommand
     }
 
     /**
+     * @return callable(string, array<string, mixed>): void|null
+     */
+    private function makeLogger(bool $quiet): ?callable
+    {
+        if ($quiet) {
+            return null;
+        }
+
+        return function (string $event, array $context): void {
+            $this->stderr($this->formatLogLine($event, $context)."\n");
+        };
+    }
+
+    /**
+     * @param  array<string, mixed>  $context
+     */
+    private function formatLogLine(string $event, array $context): string
+    {
+        $time = date('H:i:s');
+
+        return match ($event) {
+            'query.started' => sprintf(
+                '[%s] [%s] query %d/%d started: "%s" in "%s" (limit=%d)',
+                $time,
+                (string) ($context['provider'] ?? 'provider'),
+                (int) ($context['queryNumber'] ?? 0),
+                (int) ($context['queryTotal'] ?? 0),
+                (string) ($context['query'] ?? ''),
+                (string) ($context['location'] ?? ''),
+                (int) ($context['maxResults'] ?? 0),
+            ),
+            'query.urls_found' => sprintf(
+                '[%s] [direct] found %d organization urls for "%s"',
+                $time,
+                (int) ($context['urlsFound'] ?? 0),
+                (string) ($context['query'] ?? ''),
+            ),
+            'query.finished' => sprintf(
+                '[%s] [%s] query finished: "%s" (saved=%d, placesWithWebsites=%d)',
+                $time,
+                (string) ($context['provider'] ?? 'provider'),
+                (string) ($context['query'] ?? ''),
+                (int) ($context['totalSaved'] ?? 0),
+                (int) ($context['placesWithWebsites'] ?? 0),
+            ),
+            'place.fetching' => sprintf(
+                '[%s] [direct] card %d/%d: %s',
+                $time,
+                (int) ($context['urlNumber'] ?? 0),
+                (int) ($context['urlTotal'] ?? 0),
+                (string) ($context['url'] ?? ''),
+            ),
+            'place.saved' => sprintf(
+                '[%s] [%s] saved #%d: %s — %s',
+                $time,
+                (string) ($context['provider'] ?? 'provider'),
+                (int) ($context['totalSaved'] ?? 0),
+                (string) ($context['title'] ?? ''),
+                (string) ($context['website'] ?? ''),
+            ),
+            'place.skipped' => sprintf(
+                '[%s] [%s] skipped: %s (%s)',
+                $time,
+                (string) ($context['provider'] ?? 'provider'),
+                (string) ($context['url'] ?? ''),
+                (string) ($context['reason'] ?? 'unknown reason'),
+            ),
+            'place.duplicate' => sprintf(
+                '[%s] [%s] duplicate skipped: %s (%s)',
+                $time,
+                (string) ($context['provider'] ?? 'provider'),
+                (string) ($context['title'] ?? ''),
+                (string) ($context['businessId'] ?? ''),
+            ),
+            default => sprintf('[%s] %s %s', $time, $event, json_encode($context, JSON_UNESCAPED_UNICODE) ?: ''),
+        };
+    }
+
+    /**
      * @param  Place[]  $places
      */
     private function writeCsv(string $path, array $places): void
@@ -314,6 +402,7 @@ Options:
   --max-posts=0                       Optional Apify places actor maxPosts. Default: 0
   --timeout=900                       Apify waitForFinish timeout in seconds. Default: 900
   --delay-ms=750                      Direct provider delay between organization page requests. Default: 750
+  --quiet, -q                         Disable progress logs and print only final status/errors.
   --help                              Show this help.
 
 Examples:

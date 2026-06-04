@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+use GuzzleHttp\Client as HttpClient;
+use GuzzleHttp\Handler\MockHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Psr7\Response;
 use YandexParser\Provider\DirectYandexMapsProvider;
 
 function makeDirectYandexMapsProviderParser(): DirectYandexMapsProvider
@@ -95,4 +99,45 @@ HTML, 'https://yandex.ru/maps/org/krasnodar_servis/2233445566/', 'Краснод
         ->and($data['phones'])->toContain('+7 861 555-44-33')
         ->and($data['longitude'])->toBe(38.976)
         ->and($data['latitude'])->toBe(45.044);
+});
+
+it('emits progress logs while collecting direct places', function () {
+    $mock = new MockHandler([
+        new Response(200, [], '<a href="/maps/org/krasnodar_servis/2233445566/">Краснодар Сервис</a>'),
+        new Response(200, [], <<<'HTML'
+<html>
+<head>
+<meta property="og:title" content="Краснодар Сервис">
+<script>{"website":"https:\/\/www.service-example.ru\/contacts","address":"Краснодар, Северная, 10"}</script>
+</head>
+<body>+7 861 555-44-33</body>
+</html>
+HTML),
+    ]);
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => HandlerStack::create($mock),
+        ]),
+        delayMs: 0,
+    );
+    $events = [];
+
+    $places = $provider->collect(
+        queries: ['кафе'],
+        location: 'Краснодар',
+        maxResultsPerQuery: 10,
+        logger: static function (string $event, array $context) use (&$events): void {
+            $events[] = [$event, $context];
+        },
+    );
+
+    expect($places)->toHaveCount(1)
+        ->and(array_column($events, 0))->toContain('query.started')
+        ->and(array_column($events, 0))->toContain('query.urls_found')
+        ->and(array_column($events, 0))->toContain('place.fetching')
+        ->and(array_column($events, 0))->toContain('place.saved')
+        ->and(array_column($events, 0))->toContain('query.finished')
+        ->and($events[3][1]['website'])->toBe('https://www.service-example.ru/contacts');
 });
