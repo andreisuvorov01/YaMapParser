@@ -36,6 +36,86 @@ foreach ($places as $place) {
 }
 ```
 
+
+## CLI: сбор организаций с сайтами
+
+После установки зависимостей CLI доступен как `vendor/bin/yandex-parser` при установке пакета через Composer или как `php bin/yandex-parser` при запуске из репозитория.
+
+### Вариант 1: через Apify actor
+
+Это более стабильный вариант: библиотека использует actor `zen-studio/yandex-places-scraper`, ждёт dataset и сохраняет только карточки с `website`. Для запуска нужен токен Apify. У Apify есть свои тарифы/лимиты, поэтому стоимость зависит от вашего аккаунта и выбранного actor.
+
+```bash
+composer install
+export APIFY_TOKEN="apify_api_ваш_токен"
+
+php bin/yandex-parser collect:websites \
+  --provider=apify \
+  --location="Краснодар" \
+  --queries="ресторан,кафе,стоматология,клиника,салон красоты,автосервис,отель" \
+  --max-results-per-query=500 \
+  --output=krasnodar_websites.csv
+```
+
+### Вариант 2: без Apify API
+
+Если Apify не подходит или платный лимит исчерпан, можно попробовать экспериментальный direct-provider. Он не требует `APIFY_TOKEN` и парсит публичные HTML-страницы Яндекс Карт. Этот режим менее стабильный: Яндекс может менять разметку, ограничивать частоту запросов или не отдавать сайт в HTML. Используйте его только там, где это соответствует применимым правилам и законам.
+
+```bash
+composer install
+
+php bin/yandex-parser collect:websites \
+  --provider=direct \
+  --location="Краснодар" \
+  --queries="ресторан,кафе,стоматология,клиника,салон красоты,автосервис,отель" \
+  --max-results-per-query=100 \
+  --delay-ms=1000 \
+  --output=krasnodar_websites_direct.csv
+```
+
+### Файл рубрик
+
+Для более полного сбора используйте готовый пример `examples/queries-krasnodar.txt` или заведите свой файл `queries-krasnodar.txt` — по одной рубрике на строку:
+
+```text
+ресторан
+кафе
+стоматология
+клиника
+салон красоты
+автосервис
+отель
+юридические услуги
+агентство недвижимости
+детский сад
+```
+
+И запустите:
+
+```bash
+php bin/yandex-parser collect:websites \
+  --provider=apify \
+  --location="Краснодар" \
+  --queries-file=examples/queries-krasnodar.txt \
+  --max-results-per-query=500 \
+  --output=krasnodar_websites.csv
+```
+
+CSV содержит: `business_id`, `title`, `city`, `address`, `website`, `website_host`, `phone`, `rating`, `reviews`, `yandex_maps_url`.
+
+Во время работы CLI пишет progress-лог в STDERR: текущую рубрику, сколько URL карточек найдено, какую карточку сейчас открывает, какие организации сохранены, какие пропущены и какие оказались дублями. Если нужен тихий режим для cron/пайплайна, добавьте `--quiet`.
+
+Пример логов:
+
+```text
+[12:00:01] [direct] query 1/7 started: "ресторан" in "Краснодар" (limit=100)
+[12:00:02] [direct] found 42 organization urls for "ресторан"
+[12:00:03] [direct] card 1/42: https://yandex.ru/maps/org/...
+[12:00:04] [direct] saved #1: Название организации — https://example.ru
+```
+
+> Важно: «все организации города» технически собираются как агрегация по рубрикам/запросам. Чем шире список рубрик, тем больше покрытие; CLI дедуплицирует карточки по `businessId`.
+
 ## Методы
 
 ### Организации (Яндекс Карты)
@@ -56,6 +136,48 @@ $places = $client->scrapePlaces(
     ],
 );
 ```
+
+### Организации с сайтами в карточке (Яндекс Карты)
+
+Для лидогенерации можно сразу отфильтровать только те карточки, где Яндекс Карты вернули поле `website`. Метод `scrapePlacesWithWebsites()` сам включает `enrichBusinessData => true` по умолчанию и возвращает только `Place` с непустым сайтом. Для нескольких рубрик используйте `collectPlacesWithWebsites()` — он запускает отдельный поиск по каждой рубрике и дедуплицирует результат по `businessId`.
+
+```php
+use YandexParser\Language;
+
+// Милан, Прага или Краснодар — меняйте только location.
+$places = $client->collectPlacesWithWebsites(
+    queries: [
+        'restaurant',
+        'hotel',
+        'clinic',
+        'beauty salon',
+        'car service',
+        'real estate agency',
+    ],
+    location: 'Milan, Italy', // или 'Prague, Czechia', 'Краснодар'
+    maxResultsPerQuery: 500,
+    language: Language::Auto,
+    options: [
+        // Дополнительные фильтры актора можно передавать как в scrapePlaces().
+        'filterRating' => 4.0,
+        'maxPhotos' => 0,
+    ],
+);
+
+foreach ($places as $place) {
+    echo implode(';', [
+        $place->title,
+        $place->city,
+        $place->address,
+        $place->website,
+        $place->getWebsiteHost(),
+        $place->getFirstPhone(),
+        $place->url,
+    ]) . PHP_EOL;
+}
+```
+
+> Важно: «все организации города» — это практическая агрегация по рубрикам/поисковым запросам. Чем шире список `queries`, тем полнее покрытие; один поисковый запрос обычно ограничен выдачей Яндекс Карт и настройкой `maxResultsPerQuery`.
 
 ### Отзывы (Яндекс Карты)
 
@@ -140,6 +262,15 @@ foreach ($listings as $listing) {
     }
 }
 ```
+
+## Акторы Apify
+
+| Направление | Метод | DTO | Actor ID |
+|-------------|-------|-----|----------|
+| Организации и места Яндекс Карт | `scrapePlaces()` / `scrapePlacesWithWebsites()` / `collectPlacesWithWebsites()` | `YandexParser\DTO\Place` | `zen-studio/yandex-places-scraper` |
+| Отзывы Яндекс Карт | `scrapeReviews()` | `YandexParser\DTO\Review` | `zen-studio/yandex-reviews-scraper` |
+| Товары Яндекс Маркета | `scrapeProducts()` | `YandexParser\DTO\Product` | `zen-studio/yandex-market-scraper-parser` |
+| Объявления Яндекс Недвижимости | `scrapeListings()` | `YandexParser\DTO\Listing` | `zen-studio/yandex-realty-scraper` |
 
 ## Перечисления
 
