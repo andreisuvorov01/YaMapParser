@@ -289,7 +289,27 @@ final readonly class Place
      */
     public function hasWebsite(): bool
     {
-        return $this->website !== null && $this->website !== '';
+        return $this->website !== null && trim($this->website) !== '';
+    }
+
+    /**
+     * Get a normalized website host without a leading www., or null if no website is available.
+     */
+    public function getWebsiteHost(): ?string
+    {
+        if (! $this->hasWebsite()) {
+            return null;
+        }
+
+        $website = trim((string) $this->website);
+        $url = str_contains($website, '://') ? $website : 'https://'.$website;
+        $host = parse_url($url, PHP_URL_HOST);
+
+        if (! is_string($host) || $host === '') {
+            return null;
+        }
+
+        return preg_replace('/^www\./i', '', strtolower($host)) ?? strtolower($host);
     }
 
     /**
