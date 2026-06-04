@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace YandexParser\Console;
 
+use GuzzleHttp\ClientInterface;
 use YandexParser\Client;
 use YandexParser\Config;
 use YandexParser\DTO\Place;
@@ -135,6 +136,7 @@ final class CollectWebsitesCommand
         foreach (array_slice($argv, 1) as $argument) {
             if ($argument === '--help' || $argument === '-h') {
                 $options['help'] = true;
+
                 continue;
             }
 
@@ -195,7 +197,7 @@ final class CollectWebsitesCommand
                 return null;
             }
 
-            if (! interface_exists(\GuzzleHttp\ClientInterface::class)) {
+            if (! interface_exists(ClientInterface::class)) {
                 $this->stderr("Guzzle is not installed. Run composer install first.\n");
 
                 return null;

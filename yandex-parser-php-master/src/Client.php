@@ -27,7 +27,7 @@ final class Client
     ) {
         $this->config = $config ?? new Config($apiToken);
         $this->http = $http ?? new HttpClient([
-            'base_uri' => $this->config->baseUrl,
+            'base_uri' => rtrim($this->config->baseUrl, '/').'/',
             'timeout' => $this->config->timeout,
             'headers' => [
                 'Authorization' => 'Bearer '.$this->config->apiToken,
@@ -315,7 +315,7 @@ final class Client
      */
     private function runActor(string $actorId, array $input): array
     {
-        $response = $this->http->request('POST', "/acts/{$actorId}/runs", [
+        $response = $this->http->request('POST', "acts/{$actorId}/runs", [
             'json' => $input,
             'query' => ['waitForFinish' => $this->config->timeout],
         ]);
@@ -343,7 +343,7 @@ final class Client
     private function fetchDataset(string $datasetId): array
     {
         try {
-            $response = $this->http->request('GET', "/datasets/{$datasetId}/items");
+            $response = $this->http->request('GET', "datasets/{$datasetId}/items");
 
             /** @var array<int, array<string, mixed>> $items */
             $items = json_decode($response->getBody()->getContents(), true);

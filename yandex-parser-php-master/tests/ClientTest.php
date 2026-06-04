@@ -19,7 +19,7 @@ function makeMockedClient(array $responses, array &$history): Client
     $stack->push(Middleware::history($history));
 
     $http = new HttpClient([
-        'base_uri' => 'https://api.apify.com/v2',
+        'base_uri' => 'https://api.apify.com/v2/',
         'handler' => $stack,
     ]);
 

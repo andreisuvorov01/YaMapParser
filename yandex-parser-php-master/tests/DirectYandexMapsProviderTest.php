@@ -4,8 +4,18 @@ declare(strict_types=1);
 
 use YandexParser\Provider\DirectYandexMapsProvider;
 
+function makeDirectYandexMapsProviderParser(): DirectYandexMapsProvider
+{
+    $reflection = new ReflectionClass(DirectYandexMapsProvider::class);
+
+    /** @var DirectYandexMapsProvider $provider */
+    $provider = $reflection->newInstanceWithoutConstructor();
+
+    return $provider;
+}
+
 it('extracts organization urls from direct Yandex Maps HTML', function () {
-    $provider = new DirectYandexMapsProvider(delayMs: 0);
+    $provider = makeDirectYandexMapsProviderParser();
 
     $urls = $provider->extractOrganizationUrls(<<<'HTML'
 <html>
@@ -21,7 +31,7 @@ HTML);
 });
 
 it('parses place data from direct Yandex Maps organization page HTML', function () {
-    $provider = new DirectYandexMapsProvider(delayMs: 0);
+    $provider = makeDirectYandexMapsProviderParser();
 
     $data = $provider->parsePlacePage(<<<'HTML'
 <html>
@@ -57,4 +67,32 @@ HTML, 'https://yandex.ru/maps/org/krasnodar_klinika/1234567890/', 'Красно�
         ->and($data['phones'])->toContain('+7 861 123-45-67')
         ->and($data['latitude'])->toBe(45.035470)
         ->and($data['longitude'])->toBe(38.975313);
+});
+
+it('parses fallback website and address fields without regex warnings', function () {
+    $provider = makeDirectYandexMapsProviderParser();
+
+    $data = $provider->parsePlacePage(<<<'HTML'
+<html>
+<head>
+<meta property="og:title" content="Краснодар Сервис">
+<script>
+window.__INITIAL_STATE__ = {
+    "website":"https:\/\/www.service-example.ru\/contacts",
+    "address":"Краснодар, Северная, 10",
+    "coordinates":[38.976,45.044]
+};
+</script>
+</head>
+<body>+7 861 555-44-33</body>
+</html>
+HTML, 'https://yandex.ru/maps/org/krasnodar_servis/2233445566/', 'Краснодар');
+
+    expect($data['businessId'])->toBe('2233445566')
+        ->and($data['title'])->toBe('Краснодар Сервис')
+        ->and($data['website'])->toBe('https://www.service-example.ru/contacts')
+        ->and($data['address'])->toBe('Краснодар, Северная, 10')
+        ->and($data['phones'])->toContain('+7 861 555-44-33')
+        ->and($data['longitude'])->toBe(38.976)
+        ->and($data['latitude'])->toBe(45.044);
 });

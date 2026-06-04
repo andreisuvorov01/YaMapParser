@@ -229,8 +229,8 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
             }
         }
 
-        preg_match_all('~"(?:website|site|url|href)"\s*:\s*"((?:https?:)?//[^"\\]+)"~u', str_replace('\\/', '/', $html), $matches);
-        $candidates = array_merge($candidates, $matches[1] ?? []);
+        preg_match_all('~"(?:website|site|url|href)"\s*:\s*"((?:https?:)?//[^"\\\\]+)"~u', str_replace('\\/', '/', $html), $matches);
+        $candidates = array_merge($candidates, $matches[1]);
 
         foreach ($candidates as $candidate) {
             $candidate = str_starts_with($candidate, '//') ? 'https:'.$candidate : $candidate;
@@ -293,7 +293,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
             }
         }
 
-        if (preg_match('~"address"\s*:\s*"([^"\\]+)"~u', $html, $match) === 1) {
+        if (preg_match('~"address"\s*:\s*"([^"\\\\]+)"~u', $html, $match) === 1) {
             return html_entity_decode($match[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
         }
 
@@ -317,7 +317,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         }
 
         preg_match_all('~(?:tel:)?(\+?\d[\d\s().-]{7,}\d)~u', $html, $matches);
-        $phones = array_merge($phones, $matches[1] ?? []);
+        $phones = array_merge($phones, $matches[1]);
 
         return array_values(array_unique(array_map('trim', $phones)));
     }
