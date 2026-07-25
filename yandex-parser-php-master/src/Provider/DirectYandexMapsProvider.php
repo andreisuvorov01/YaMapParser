@@ -50,6 +50,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         'ya.ru',
         'yastatic.net',
         'vk.com',
+        'vk.ru',
         'vkontakte.ru',
         'ok.ru',
         'odnoklassniki.ru',
@@ -76,6 +77,15 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         'my.mail.ru',
         'pinterest.com',
         'linkedin.com',
+        // Review/listing aggregators that show up in Maps card "sources" (cross-references
+        // to other directories the org is also listed on) - never the org's own site.
+        'advizzer.com',
+        'kupikupon.ru',
+        'restoran.ru',
+        'zoon.ru',
+        'flamp.ru',
+        'foursquare.com',
+        'tripadvisor.',
     ];
 
     private ClientInterface $http;
@@ -528,15 +538,30 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
     private function extractWebsite(?array $jsonLd, string $html): ?string
     {
         $candidates = [];
+        $normalizedHtml = str_replace('\\/', '/', $html);
 
         // Only `url` represents the organization's own site. `sameAs` is schema.org's
         // field for OTHER profiles (VK, Instagram, ...) and must not be treated as a website.
+        // In practice Yandex Maps org pages never embed a LocalBusiness JSON-LD block (only
+        // generic WebSite/BreadcrumbList), so this is a defensive fallback, not the common path.
         $value = $jsonLd['url'] ?? null;
         if (is_string($value)) {
             $candidates[] = $value;
         }
 
-        preg_match_all('~"(?:website|site|url|href)"\s*:\s*"((?:https?:)?//[^"\\\\]+)"~u', str_replace('\\/', '/', $html), $matches);
+        // The organization's own site(s) live in a dedicated "urls" ARRAY in the page's
+        // embedded JSON state - e.g. "urls":["http://www.example.ru/"]. This is the reliable,
+        // business-scoped source: unlike singular "url"/"href" keys, it isn't shared with the
+        // page's ad banner ("profilePromo") or cross-reference "sources" (Avito, 2GIS,
+        // Restoran.ru, ...), which is exactly what caused every organization to end up with
+        // the SAME "website" - the first "url"/"href" match anywhere on the page, not theirs.
+        if (preg_match('~"urls"\s*:\s*\[\s*"([^"]+)"~u', $normalizedHtml, $urlsMatch) === 1) {
+            $candidates[] = $urlsMatch[1];
+        }
+
+        // Narrow last-resort fallback for page shapes without an "urls" array. Deliberately
+        // excludes "url"/"href" - see above for why those are unsafe to scan page-wide.
+        preg_match_all('~"(?:website|site)"\s*:\s*"((?:https?:)?//[^"\\\\]+)"~u', $normalizedHtml, $matches);
         $candidates = array_merge($candidates, $matches[1]);
 
         foreach ($candidates as $candidate) {

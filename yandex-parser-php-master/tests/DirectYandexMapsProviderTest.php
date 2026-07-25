@@ -227,6 +227,43 @@ HTML, 'https://yandex.ru/maps/org/cafe_example/1111111111/', 'Краснодар
     expect($data['website'])->toBe('https://cafe-example.ru');
 });
 
+it('picks the real site from the "urls" array, not the page ad banner or aggregator sources', function () {
+    $provider = makeDirectYandexMapsProviderParser();
+
+    // Modeled on real Yandex Maps org page JSON: a site-wide ad banner ("profilePromo")
+    // and cross-reference "sources" links both use "url"/"href" and appear BEFORE the
+    // organization's own "urls" array - this is exactly what caused every scraped
+    // organization to end up with the same website (the ad banner's URL).
+    $data = $provider->parsePlacePage(
+        '<html><body><script>'
+        .'{"profilePromo":{"banner":{"url":"http://punkorama.ru/"}},'
+        .'"sources":[{"id":"restoran_ru","name":"Restoran.ru","href":"http://www.restoran.ru"},'
+        .'{"id":"kupikupon","name":"КупиКупон","href":"https://kupikupon.ru"}],'
+        .'"urls":["http://www.r-bazar.ru/"]}'
+        .'</script></body></html>',
+        'https://yandex.ru/maps/org/rybny_bazar/1070354797/',
+        'Москва',
+    );
+
+    expect($data['website'])->toBe('http://www.r-bazar.ru/');
+});
+
+it('finds no website when the "urls" array is empty and only ads/sources are present', function () {
+    $provider = makeDirectYandexMapsProviderParser();
+
+    $data = $provider->parsePlacePage(
+        '<html><body><script>'
+        .'{"profilePromo":{"banner":{"url":"http://punkorama.ru/"}},'
+        .'"sources":[{"id":"restoran_ru","name":"Restoran.ru","href":"http://www.restoran.ru"}],'
+        .'"urls":[]}'
+        .'</script></body></html>',
+        'https://yandex.ru/maps/org/no_site_example/1000000001/',
+        'Москва',
+    );
+
+    expect($data['website'])->toBeNull();
+});
+
 it('skips a vk.com match from the regex fallback and returns no website when nothing else is found', function () {
     $provider = makeDirectYandexMapsProviderParser();
 
