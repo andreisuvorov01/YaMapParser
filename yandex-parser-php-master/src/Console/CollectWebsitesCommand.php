@@ -549,6 +549,11 @@ final class CollectWebsitesCommand
                 (int) ($context['page'] ?? 0),
                 (string) ($context['message'] ?? ''),
             ),
+            'query.area_expanded' => sprintf(
+                '[%s] [direct] "%s" looks capped by Yandex\'s per-search limit — searching city sub-areas too',
+                $time,
+                (string) ($context['query'] ?? ''),
+            ),
             'place.duplicate' => sprintf(
                 '[%s] [%s] duplicate skipped: %s (%s)',
                 $time,

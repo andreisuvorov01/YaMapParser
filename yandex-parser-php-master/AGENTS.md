@@ -86,6 +86,14 @@ tests/
   on that query, absorbing transient connection errors that previously could stop pagination after one hiccup;
   dedup during URL discovery is now by business ID (not exact URL string), since Yandex serves the same org's page
   under multiple `<link rel="alternate">` domains (yandex.ru/.com/.kz/...) that used to count as separate results
+- Yandex's own city-wide search listing stops after ~12 pages (~60 results) no matter how many organizations
+  actually match (confirmed directly against yandex.ru: page 13+ is a normal, unblocked, empty page). When a pass
+  returns >= `AREA_SUBDIVISION_TRIGGER` (55) new results, `findOrganizationUrls()` assumes it hit that ceiling and
+  calls `subdivideArea()`, which recursively quarters `KNOWN_CITY_BOUNDS` and re-searches each quadrant with a
+  `ll`/`z` viewport (`searchPass()`, `TILE_ZOOM`) via `subdivideArea()`/`AREA_SUBDIVISION_MAX_DEPTH` (4), merging by
+  business ID. Only triggers for known cities with both a geoId and bounds; `KNOWN_CITY_BOUNDS` is a generous
+  approximation (only Moscow's corners were spot-checked against yandex.ru) - imprecision there costs a few
+  near-empty tile requests or slightly less edge coverage, never wrong data
 - `Provider\BypassProxyClient` is an optional fallback for `DirectYandexMapsProvider`: it's only ever consulted
   after a direct request already failed or came back as a blocked/CAPTCHA page (never on the normal path), talks
   over HTTP to a separately-run proxy service (`POST /fetch`, `GET /health`), and can best-effort spawn that

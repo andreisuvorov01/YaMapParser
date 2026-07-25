@@ -90,6 +90,53 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
     ];
 
     /**
+     * Approximate [minLat, maxLat, minLon, maxLon] bounding boxes for the cities in
+     * KNOWN_CITY_GEO_IDS, used to split a search into sub-areas when the whole-city pass
+     * looks like it hit Yandex's ~60-result ceiling (see AREA_SUBDIVISION_TRIGGER). These
+     * are deliberately generous approximations, not surveyed city limits: overshooting
+     * just costs a few near-empty tile searches at the edge, undershooting only means
+     * slightly less coverage at the edge - neither produces wrong data, unlike a wrong
+     * geoId. Spot-checked Moscow's corners directly against yandex.ru; the rest are not
+     * individually verified.
+     */
+    private const KNOWN_CITY_BOUNDS = [
+        'москва' => [55.55, 55.92, 37.30, 37.90],
+        'moscow' => [55.55, 55.92, 37.30, 37.90],
+        'санкт-петербург' => [59.80, 60.08, 30.10, 30.55],
+        'спб' => [59.80, 60.08, 30.10, 30.55],
+        'saint petersburg' => [59.80, 60.08, 30.10, 30.55],
+        'st petersburg' => [59.80, 60.08, 30.10, 30.55],
+        'екатеринбург' => [56.72, 56.92, 60.45, 60.75],
+        'yekaterinburg' => [56.72, 56.92, 60.45, 60.75],
+        'казань' => [55.70, 55.90, 49.05, 49.30],
+        'kazan' => [55.70, 55.90, 49.05, 49.30],
+        'новосибирск' => [54.90, 55.10, 82.85, 83.15],
+        'novosibirsk' => [54.90, 55.10, 82.85, 83.15],
+        'нижний новгород' => [56.20, 56.38, 43.85, 44.10],
+        'nizhny novgorod' => [56.20, 56.38, 43.85, 44.10],
+        'самара' => [53.10, 53.30, 50.05, 50.30],
+        'samara' => [53.10, 53.30, 50.05, 50.30],
+        'ростов-на-дону' => [47.15, 47.30, 39.60, 39.85],
+        'rostov-on-don' => [47.15, 47.30, 39.60, 39.85],
+        'краснодар' => [45.00, 45.15, 38.90, 39.10],
+        'krasnodar' => [45.00, 45.15, 38.90, 39.10],
+        'челябинск' => [55.10, 55.25, 61.30, 61.55],
+        'chelyabinsk' => [55.10, 55.25, 61.30, 61.55],
+        'уфа' => [54.65, 54.85, 55.85, 56.15],
+        'ufa' => [54.65, 54.85, 55.85, 56.15],
+        'пермь' => [57.95, 58.10, 56.10, 56.35],
+        'perm' => [57.95, 58.10, 56.10, 56.35],
+        'воронеж' => [51.60, 51.75, 39.10, 39.30],
+        'voronezh' => [51.60, 51.75, 39.10, 39.30],
+        'волгоград' => [48.55, 48.85, 44.35, 44.60],
+        'volgograd' => [48.55, 48.85, 44.35, 44.60],
+        'красноярск' => [55.95, 56.10, 92.75, 93.05],
+        'krasnoyarsk' => [55.95, 56.10, 92.75, 93.05],
+        'омск' => [54.90, 55.05, 73.25, 73.50],
+        'omsk' => [54.90, 55.05, 73.25, 73.50],
+    ];
+
+    /**
      * Social/messenger/aggregator domains that show up in Yandex Maps card data
      * (JSON-LD `sameAs`, share buttons, etc.) but are never the organization's
      * own website. Without this, extractWebsite() can pick a VK/Instagram/etc.
@@ -262,6 +309,21 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
     }
 
     /**
+     * Yandex's own search listing stops after ~12 pages (~60 results) for a single
+     * city-wide search, however many organizations actually match - confirmed directly
+     * against yandex.ru (page 13+ comes back as a normal, unblocked, empty page). A
+     * single pass therefore cannot be "the whole city" for any reasonably common rubric.
+     * If a pass (whole-city or a sub-area) comes back with at least this many NEW
+     * results, we assume it likely hit that ceiling rather than genuinely ran out, and
+     * split the area further (see AREA_SUBDIVISION_MAX_DEPTH) instead of trusting it as complete.
+     */
+    private const AREA_SUBDIVISION_TRIGGER = 55;
+
+    private const AREA_SUBDIVISION_MAX_DEPTH = 4;
+
+    private const TILE_ZOOM = 14;
+
+    /**
      * @return string[]
      */
     private function findOrganizationUrls(
@@ -278,6 +340,160 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
 
         $geoId = $this->resolveCityGeoId($location);
 
+        $newInCityPass = $this->searchPass(
+            $query,
+            $location,
+            $geoId,
+            null,
+            $maxPages,
+            $urls,
+            $seenUrls,
+            $seenBusinessIds,
+            $maxResults,
+            $unlimited,
+            $logger,
+        );
+
+        $bounds = $this->resolveCityBounds($location);
+
+        if ($geoId !== null && $bounds !== null && $newInCityPass >= self::AREA_SUBDIVISION_TRIGGER
+            && ($unlimited || count($urls) < $maxResults)
+        ) {
+            $this->log($logger, 'query.area_expanded', [
+                'provider' => 'direct',
+                'query' => $query,
+                'reason' => 'city-wide search likely hit Yandex\'s ~60-result ceiling; searching sub-areas too',
+            ]);
+
+            $this->subdivideArea(
+                $query,
+                $location,
+                $geoId,
+                $bounds,
+                0,
+                $maxPages,
+                $urls,
+                $seenUrls,
+                $seenBusinessIds,
+                $maxResults,
+                $unlimited,
+                $logger,
+            );
+        }
+
+        return $urls;
+    }
+
+    /**
+     * Recursively splits a bounding box into 4 quadrants, searching each one (via
+     * searchPass with that quadrant's center as the viewport). A quadrant that itself
+     * comes back with >= AREA_SUBDIVISION_TRIGGER new results is assumed to still be
+     * hitting the ceiling and is split further, up to AREA_SUBDIVISION_MAX_DEPTH.
+     *
+     * @param  array{0: float, 1: float, 2: float, 3: float}  $bounds  [minLat, maxLat, minLon, maxLon]
+     * @param  string[]  $urls
+     * @param  array<string, true>  $seenUrls
+     * @param  array<string, true>  $seenBusinessIds
+     * @param  callable(string, array<string, mixed>): void|null  $logger
+     */
+    private function subdivideArea(
+        string $query,
+        string $location,
+        string $geoId,
+        array $bounds,
+        int $depth,
+        int $maxPages,
+        array &$urls,
+        array &$seenUrls,
+        array &$seenBusinessIds,
+        int $maxResults,
+        bool $unlimited,
+        ?callable $logger,
+    ): void {
+        if ($depth >= self::AREA_SUBDIVISION_MAX_DEPTH) {
+            return;
+        }
+
+        [$minLat, $maxLat, $minLon, $maxLon] = $bounds;
+        $midLat = ($minLat + $maxLat) / 2;
+        $midLon = ($minLon + $maxLon) / 2;
+
+        $quadrants = [
+            [$minLat, $midLat, $minLon, $midLon],
+            [$minLat, $midLat, $midLon, $maxLon],
+            [$midLat, $maxLat, $minLon, $midLon],
+            [$midLat, $maxLat, $midLon, $maxLon],
+        ];
+
+        foreach ($quadrants as $quadrant) {
+            if (! $unlimited && count($urls) >= $maxResults) {
+                return;
+            }
+
+            [$qMinLat, $qMaxLat, $qMinLon, $qMaxLon] = $quadrant;
+            $viewport = [($qMinLat + $qMaxLat) / 2, ($qMinLon + $qMaxLon) / 2];
+
+            $newInQuadrant = $this->searchPass(
+                $query,
+                $location,
+                $geoId,
+                $viewport,
+                $maxPages,
+                $urls,
+                $seenUrls,
+                $seenBusinessIds,
+                $maxResults,
+                $unlimited,
+                $logger,
+            );
+
+            if ($newInQuadrant >= self::AREA_SUBDIVISION_TRIGGER) {
+                $this->subdivideArea(
+                    $query,
+                    $location,
+                    $geoId,
+                    $quadrant,
+                    $depth + 1,
+                    $maxPages,
+                    $urls,
+                    $seenUrls,
+                    $seenBusinessIds,
+                    $maxResults,
+                    $unlimited,
+                    $logger,
+                );
+            }
+        }
+    }
+
+    /**
+     * Runs one paginated search (whole city, or a single geo viewport tile) and merges
+     * newly found organization URLs into $urls/$seenUrls/$seenBusinessIds. Returns how
+     * many NEW urls this pass added, which callers use to decide whether the area is
+     * still "dense" enough that it might have hit Yandex's per-search result ceiling.
+     *
+     * @param  array{0: float, 1: float}|null  $viewport  [lat, lon] center of a sub-area, or null for the whole city
+     * @param  string[]  $urls
+     * @param  array<string, true>  $seenUrls
+     * @param  array<string, true>  $seenBusinessIds
+     * @param  callable(string, array<string, mixed>): void|null  $logger
+     */
+    private function searchPass(
+        string $query,
+        string $location,
+        ?string $geoId,
+        ?array $viewport,
+        int $maxPages,
+        array &$urls,
+        array &$seenUrls,
+        array &$seenBusinessIds,
+        int $maxResults,
+        bool $unlimited,
+        ?callable $logger,
+    ): int {
+        $newTotal = 0;
+        $area = $viewport !== null ? sprintf('%.4f,%.4f', $viewport[0], $viewport[1]) : 'city';
+
         for ($page = 1; $page <= $maxPages; $page++) {
             if ($geoId !== null) {
                 // Geo-scoped search: reliably lists the rubric within that city instead of
@@ -291,6 +507,12 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
                     $queryParams['page'] = $page;
                 }
             }
+
+            if ($viewport !== null) {
+                $queryParams['ll'] = $viewport[1].','.$viewport[0];
+                $queryParams['z'] = self::TILE_ZOOM;
+            }
+
             $absoluteUrl = 'https://yandex.ru'.$path.($queryParams !== [] ? '?'.http_build_query($queryParams) : '');
 
             try {
@@ -303,11 +525,12 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
 
                 if ($body === null) {
                     // A single flaky page must not abort the whole (possibly hundreds of
-                    // queries long) run - keep whatever URLs this query already found and
+                    // queries long) run - keep whatever URLs this pass already found and
                     // move on, same as an anti-bot block below.
                     $this->log($logger, 'query.error', [
                         'provider' => 'direct',
                         'query' => $query,
+                        'area' => $area,
                         'page' => $page,
                         'message' => $e->getMessage(),
                     ]);
@@ -325,6 +548,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
                     $this->log($logger, 'query.blocked', [
                         'provider' => 'direct',
                         'query' => $query,
+                        'area' => $area,
                         'page' => $page,
                     ]);
 
@@ -358,6 +582,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
 
                 $urls[] = $url;
                 $newOnPage++;
+                $newTotal++;
 
                 if (! $unlimited && count($urls) >= $maxResults) {
                     break 2;
@@ -367,6 +592,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
             $this->log($logger, 'query.page_loaded', [
                 'provider' => 'direct',
                 'query' => $query,
+                'area' => $area,
                 'page' => $page,
                 'urlsOnPage' => count($pageUrls),
                 'newUrlsOnPage' => $newOnPage,
@@ -378,7 +604,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
             }
         }
 
-        return $urls;
+        return $newTotal;
     }
 
     /**
@@ -387,6 +613,15 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
     private function resolveCityGeoId(string $location): ?string
     {
         return self::KNOWN_CITY_GEO_IDS[mb_strtolower(trim($location), 'UTF-8')] ?? null;
+    }
+
+    /**
+     * @see KNOWN_CITY_BOUNDS
+     * @return array{0: float, 1: float, 2: float, 3: float}|null
+     */
+    private function resolveCityBounds(string $location): ?array
+    {
+        return self::KNOWN_CITY_BOUNDS[mb_strtolower(trim($location), 'UTF-8')] ?? null;
     }
 
     /**

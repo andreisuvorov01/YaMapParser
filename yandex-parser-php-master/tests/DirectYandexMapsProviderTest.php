@@ -489,6 +489,53 @@ it('falls back to the bypass proxy when a place page request errors out', functi
         ->and($bypassHistory)->toHaveCount(2);
 });
 
+it('subdivides the search area into a grid when a pass looks like it hit the ~60-result ceiling', function () {
+    // Yandex's own city-wide search stops after ~60 results regardless of how many
+    // organizations actually exist (confirmed directly against yandex.ru). 55 unique
+    // orgs on the first page is enough to cross AREA_SUBDIVISION_TRIGGER and force a
+    // grid of sub-area searches - each sub-area response below repeats the exact same
+    // business IDs (nothing genuinely new there), so subdivision must stop at depth 1
+    // and merged results must still dedupe down to exactly those 55 organizations.
+    $links = [];
+    for ($i = 1; $i <= 55; $i++) {
+        $links[] = sprintf('<a href="/maps/org/place_%d/%d/">Place %d</a>', $i, 100000000 + $i, $i);
+    }
+    $cityPageOne = '<html><body>'.implode('', $links).'</body></html>';
+
+    $mock = new MockHandler([
+        new Response(200, [], $cityPageOne),
+        new Response(200, [], '<html>No more</html>'),
+        new Response(200, [], $cityPageOne),
+        new Response(200, [], $cityPageOne),
+        new Response(200, [], $cityPageOne),
+        new Response(200, [], $cityPageOne),
+    ]);
+    $history = [];
+    $stack = HandlerStack::create($mock);
+    $stack->push(Middleware::history($history));
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => $stack,
+        ]),
+        delayMs: 0,
+    );
+    $events = [];
+    $logger = static function (string $event, array $context) use (&$events): void {
+        $events[] = [$event, $context];
+    };
+
+    $reflection = new ReflectionClass($provider);
+    $method = $reflection->getMethod('findOrganizationUrls');
+    /** @var string[] $urls */
+    $urls = $method->invoke($provider, 'кафе', 'Москва', 0, 50, $logger);
+
+    expect($urls)->toHaveCount(55)
+        ->and($history)->toHaveCount(6)
+        ->and(array_column($events, 0))->toContain('query.area_expanded');
+});
+
 it('uses a geo-scoped search URL for known Russian cities instead of free text', function () {
     $mock = new MockHandler([
         new Response(200, [], '<html>No results</html>'),
