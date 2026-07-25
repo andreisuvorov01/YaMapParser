@@ -73,9 +73,48 @@ php bin/yandex-parser collect:websites \
   --max-results-per-query=0 \
   --max-pages-per-query=50 \
   --delay-ms=1000 \
+  --concurrency=3 \
   --checkpoint-interval=30 \
   --output=krasnodar_websites_direct.csv
 ```
+
+`--concurrency` (по умолчанию 1) задаёт, сколько карточек организаций direct-провайдер запрашивает параллельно — ускоряет сбор при большом числе рубрик, но повышает риск попасть под антибот-ограничения Яндекса. Если сайт Яндекс Карт отдаёт капчу, CLI логирует событие `query.blocked` вместо того, чтобы тихо решить, что рубрика пустая.
+
+Если сбор упал (ошибка сети, бан, лимит) или был прерван, каждый прогон пишет `<output>.progress.json` со списком уже пройденных рубрик. Добавьте `--resume`, чтобы при повторном запуске пропустить рубрики, отмеченные завершёнными:
+
+```bash
+php bin/yandex-parser collect:websites \
+  --provider=direct \
+  --location="Краснодар" \
+  --queries-file=examples/queries-krasnodar.txt \
+  --output=krasnodar_websites_direct.csv \
+  --resume
+```
+
+Чтобы начать сбор заново с нуля, удалите файл `<output>.progress.json`. Строки, начинающиеся с `#`, в `--queries-file` считаются комментариями и пропускаются.
+
+При необходимости оба провайдера можно направить через HTTP(S)-прокси флагом `--proxy=http://user:pass@host:port` (или переменной окружения `YANDEX_PARSER_PROXY`).
+
+### Bypass-прокси для direct-провайдера (запускается только при необходимости)
+
+Если у вас есть отдельный локальный сервис-прокси на базе Xray (например, свой `proxy_server.py` с ротацией конфигов и TLS-фингерпринтингом), direct-провайдер может использовать его как запасной вариант — **только** когда обычный запрос к Яндекс Картам не удался или страница оказалась антибот/капча-заглушкой. Для всех остальных запросов bypass-прокси не задействуется вообще, поэтому он не замедляет обычный сбор.
+
+```bash
+php bin/yandex-parser collect:websites \
+  --provider=direct \
+  --location="Краснодар" \
+  --queries-file=examples/queries-krasnodar.txt \
+  --output=krasnodar_websites_direct.csv \
+  --bypass-proxy-url=http://127.0.0.1:8765 \
+  --bypass-proxy-dir="C:\path\to\your\proxy-project"
+```
+
+- `--bypass-proxy-url` — адрес уже запущенного сервиса (по умолчанию `http://127.0.0.1:8765`, как в `proxy_server.py`). Если сервис уже поднят и слушает этот адрес, `--bypass-proxy-dir` не обязателен.
+- `--bypass-proxy-dir` — путь к проекту с `proxy_server.py`. Если сервис по `--bypass-proxy-url` недоступен, CLI один раз (при первой необходимости) попробует запустить `python proxy_server.py` в этой папке в фоне и подождать его готовности; если запустить не удалось (нет Python/зависимостей и т.п.), сбор просто продолжится без bypass-прокси — это не фатальная ошибка.
+- `--bypass-proxy-python=python` — какой исполняемый файл Python использовать для запуска.
+- Ни один из этих флагов не обязателен: без них поведение direct-провайдера полностью совпадает с тем, что было до этой возможности.
+
+> Такой сервис (собственный сервер на Python/FastAPI поверх Xray, со своими прокси-конфигами) — это отдельный проект в другом стеке; в этот репозиторий он не включается (в частности, чтобы не закоммитить чужие прокси-креды и `node_modules`). Достаточно, чтобы он был доступен по HTTP на машине, где запускается `yandex-parser`.
 
 ### Файл рубрик
 
@@ -298,12 +337,16 @@ foreach ($listings as $listing) {
 use YandexParser\Client;
 use YandexParser\Config;
 
-// Изменить таймаут или базовый URL
+// Изменить таймаут, число автоматических повторов при rate limit или прокси
 $client = new Client('токен', new Config(
     apiToken: 'токен',
     timeout: 600,
+    maxRetries: 3,
+    proxy: 'http://user:pass@host:port',
 ));
 ```
+
+`Client` сам дожидается завершения актора: после запуска он опрашивает статус рана (`actor-runs/{id}`), пока тот не станет терминальным (`SUCCEEDED`/`FAILED`/`ABORTED`/`TIMED-OUT`), и только после этого читает датасет — это защищает от чтения неполных данных с долгих раскопок. При ответе `429 Too Many Requests` клиент сам ждёт `Retry-After` и повторяет запрос до `maxRetries` раз, прежде чем выбросить `RateLimitException`.
 
 ## Обработка ошибок
 
@@ -314,9 +357,11 @@ use YandexParser\Exception\RateLimitException;
 try {
     $places = $client->scrapePlaces(query: ['кафе'], location: 'Казань');
 } catch (RateLimitException $e) {
+    // Клиент уже исчерпал внутренние повторы (Config::$maxRetries) — можно подождать ещё раз вручную.
     sleep($e->retryAfter);
     // повторить запрос
 } catch (ApiException $e) {
+    // Также выбрасывается при невалидном JSON от API или если ран актора завершился с ошибкой/таймаутом.
     echo "Ошибка API: {$e->getMessage()}" . PHP_EOL;
 }
 ```

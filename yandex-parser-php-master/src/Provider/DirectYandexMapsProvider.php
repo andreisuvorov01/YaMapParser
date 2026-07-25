@@ -7,6 +7,9 @@ namespace YandexParser\Provider;
 use GuzzleHttp\Client as HttpClient;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\Pool;
+use GuzzleHttp\Psr7\Request;
+use Psr\Http\Message\ResponseInterface;
 use YandexParser\DTO\Place;
 use YandexParser\Exception\ApiException;
 use YandexParser\Language;
@@ -16,24 +19,93 @@ use YandexParser\Language;
  *
  * It uses public Yandex Maps HTML pages, so selectors and embedded JSON formats can
  * change without notice. Prefer the Apify provider for production-grade collection.
+ *
+ * An optional BypassProxyClient can be supplied: it is only ever consulted after a
+ * direct request already failed or came back as an anti-bot/CAPTCHA page, never on
+ * the normal path, so it "works only when necessary" instead of routing every request.
  */
 final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
 {
+    /**
+     * Markers that show up on Yandex's anti-bot / SmartCaptcha interstitial pages.
+     * A page matching these is not a "0 results" search or a missing website - it's a block.
+     */
+    private const BLOCK_MARKERS = [
+        'showcaptcha',
+        'smartcaptcha',
+        'checkcaptcha',
+        'confirm that requests are not automatically generated',
+        'вы робот',
+        'подтвердите, что запросы отправляете не вы',
+    ];
+
+    /**
+     * Social/messenger/aggregator domains that show up in Yandex Maps card data
+     * (JSON-LD `sameAs`, share buttons, etc.) but are never the organization's
+     * own website. Without this, extractWebsite() can pick a VK/Instagram/etc.
+     * profile link instead of the company site - or instead of no site at all.
+     */
+    private const NON_WEBSITE_HOST_FRAGMENTS = [
+        'yandex.',
+        'ya.ru',
+        'yastatic.net',
+        'vk.com',
+        'vkontakte.ru',
+        'ok.ru',
+        'odnoklassniki.ru',
+        'instagram.com',
+        'facebook.com',
+        'fb.com',
+        'twitter.com',
+        'x.com',
+        't.me',
+        'telegram.me',
+        'telegram.org',
+        'whatsapp.com',
+        'wa.me',
+        'viber.com',
+        'youtube.com',
+        'youtu.be',
+        'tiktok.com',
+        'threads.net',
+        'avito.ru',
+        '2gis.',
+        'google.com',
+        'rutube.ru',
+        'dzen.ru',
+        'my.mail.ru',
+        'pinterest.com',
+        'linkedin.com',
+    ];
+
     private ClientInterface $http;
 
     public function __construct(
         ?ClientInterface $http = null,
         private readonly int $delayMs = 750,
+        ?string $proxy = null,
+        private readonly int $concurrency = 1,
+        private readonly ?BypassProxyClient $bypassProxy = null,
     ) {
-        $this->http = $http ?? new HttpClient([
-            'base_uri' => 'https://yandex.ru',
-            'timeout' => 30,
-            'headers' => [
-                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language' => 'ru,en;q=0.9',
-                'User-Agent' => 'Mozilla/5.0 (compatible; YandexParserPHP/1.0; +https://github.com/Scraper-APIs/yandex-scraper-php)',
-            ],
-        ]);
+        if ($http !== null) {
+            $this->http = $http;
+        } else {
+            $httpOptions = [
+                'base_uri' => 'https://yandex.ru',
+                'timeout' => 30,
+                'headers' => [
+                    'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language' => 'ru,en;q=0.9',
+                    'User-Agent' => 'Mozilla/5.0 (compatible; YandexParserPHP/1.0; +https://github.com/Scraper-APIs/yandex-scraper-php)',
+                ],
+            ];
+
+            if ($proxy !== null) {
+                $httpOptions['proxy'] = $proxy;
+            }
+
+            $this->http = new HttpClient($httpOptions);
+        }
     }
 
     /**
@@ -77,55 +149,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
                 'urlsFound' => count($urls),
             ]);
 
-            foreach ($urls as $urlIndex => $url) {
-                $this->log($logger, 'place.fetching', [
-                    'provider' => 'direct',
-                    'query' => $query,
-                    'urlNumber' => $urlIndex + 1,
-                    'urlTotal' => count($urls),
-                    'url' => $url,
-                ]);
-
-                $place = $this->fetchPlace($url, $location);
-
-                if ($place === null || ! $place->hasWebsite()) {
-                    $this->log($logger, 'place.skipped', [
-                        'provider' => 'direct',
-                        'query' => $query,
-                        'url' => $url,
-                        'reason' => 'no website or fetch failed',
-                    ]);
-
-                    continue;
-                }
-
-                $key = $place->businessId !== ''
-                    ? $place->businessId
-                    : md5($place->title.'|'.$place->address.'|'.$place->website);
-
-                if (isset($placesByKey[$key])) {
-                    $this->log($logger, 'place.duplicate', [
-                        'provider' => 'direct',
-                        'query' => $query,
-                        'title' => $place->title,
-                        'businessId' => $place->businessId,
-                    ]);
-                    $this->sleepBetweenRequests();
-
-                    continue;
-                }
-
-                $placesByKey[$key] = $place;
-                $this->log($logger, 'place.saved', [
-                    'provider' => 'direct',
-                    'query' => $query,
-                    'title' => $place->title,
-                    'website' => $place->website,
-                    'totalSaved' => count($placesByKey),
-                    'place' => $place,
-                ]);
-                $this->sleepBetweenRequests();
-            }
+            $this->fetchPlaces($urls, $query, $location, $placesByKey, $logger);
 
             $this->log($logger, 'query.finished', [
                 'provider' => 'direct',
@@ -154,20 +178,42 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         $unlimited = $maxResults <= 0;
 
         for ($page = 1; $page <= $maxPages; $page++) {
-            try {
-                $queryParams = ['text' => trim($query.' '.$location)];
-                if ($page > 1) {
-                    $queryParams['page'] = $page;
-                }
+            $queryParams = ['text' => trim($query.' '.$location)];
+            if ($page > 1) {
+                $queryParams['page'] = $page;
+            }
+            $absoluteUrl = 'https://yandex.ru/maps/?'.http_build_query($queryParams);
 
+            try {
                 $response = $this->http->request('GET', '/maps/', [
                     'query' => $queryParams,
                 ]);
+                $body = (string) $response->getBody();
             } catch (GuzzleException $e) {
-                throw new ApiException('Direct Yandex Maps search request failed: '.$e->getMessage(), 0, $e);
+                $body = $this->fetchViaBypassProxyOrNull($absoluteUrl, $logger);
+
+                if ($body === null) {
+                    throw new ApiException('Direct Yandex Maps search request failed: '.$e->getMessage(), 0, $e);
+                }
             }
 
-            $pageUrls = $this->extractOrganizationUrls((string) $response->getBody());
+            if ($this->isBlockedPage($body)) {
+                $viaBypass = $this->fetchViaBypassProxyOrNull($absoluteUrl, $logger);
+
+                if ($viaBypass !== null && ! $this->isBlockedPage($viaBypass)) {
+                    $body = $viaBypass;
+                } else {
+                    $this->log($logger, 'query.blocked', [
+                        'provider' => 'direct',
+                        'query' => $query,
+                        'page' => $page,
+                    ]);
+
+                    break;
+                }
+            }
+
+            $pageUrls = $this->extractOrganizationUrls($body);
             $newOnPage = 0;
 
             foreach ($pageUrls as $url) {
@@ -201,22 +247,183 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         return $urls;
     }
 
-    private function fetchPlace(string $url, string $location): ?Place
+    /**
+     * Fetch each organization page (optionally with several requests in flight at once,
+     * see $concurrency) and merge places with a website into $placesByKey.
+     *
+     * @param  string[]  $urls
+     * @param  array<string, Place>  $placesByKey
+     * @param  callable(string, array<string, mixed>): void|null  $logger
+     */
+    private function fetchPlaces(array $urls, string $query, string $location, array &$placesByKey, ?callable $logger): void
     {
-        try {
-            $response = $this->http->request('GET', $url);
-        } catch (GuzzleException) {
-            return null;
+        $total = count($urls);
+
+        if ($total === 0) {
+            return;
         }
 
-        $html = (string) $response->getBody();
+        $requests = function () use ($urls, $query, $total, $logger): \Generator {
+            foreach ($urls as $urlIndex => $url) {
+                $this->log($logger, 'place.fetching', [
+                    'provider' => 'direct',
+                    'query' => $query,
+                    'urlNumber' => $urlIndex + 1,
+                    'urlTotal' => $total,
+                    'url' => $url,
+                ]);
+
+                yield $url => new Request('GET', $url);
+            }
+        };
+
+        $pool = new Pool($this->http, $requests(), [
+            'concurrency' => max(1, $this->concurrency),
+            'fulfilled' => function (ResponseInterface $response, string $url) use ($query, $location, &$placesByKey, $logger): void {
+                $html = (string) $response->getBody();
+
+                if ($this->isBlockedPage($html)) {
+                    $viaBypass = $this->fetchViaBypassProxyOrNull($url, $logger);
+
+                    if ($viaBypass !== null) {
+                        $html = $viaBypass;
+                    }
+                }
+
+                $status = $this->handleFetchedPlace($url, $html, $location, $query, $placesByKey, $logger);
+
+                if ($status === 'saved' || $status === 'duplicate') {
+                    $this->sleepBetweenRequests();
+                }
+            },
+            'rejected' => function (mixed $reason, string $url) use ($query, $location, &$placesByKey, $logger): void {
+                $html = $this->fetchViaBypassProxyOrNull($url, $logger);
+
+                if ($html !== null) {
+                    $status = $this->handleFetchedPlace($url, $html, $location, $query, $placesByKey, $logger);
+
+                    if ($status === 'saved' || $status === 'duplicate') {
+                        $this->sleepBetweenRequests();
+                    }
+
+                    return;
+                }
+
+                $this->log($logger, 'place.skipped', [
+                    'provider' => 'direct',
+                    'query' => $query,
+                    'url' => $url,
+                    'reason' => 'no website or fetch failed',
+                ]);
+            },
+        ]);
+
+        $pool->promise()->wait();
+    }
+
+    /**
+     * Parse a fetched organization page and merge it into $placesByKey when it has a website.
+     *
+     * @param  array<string, Place>  $placesByKey
+     * @param  callable(string, array<string, mixed>): void|null  $logger
+     * @return 'saved'|'duplicate'|'skipped'
+     */
+    private function handleFetchedPlace(string $url, string $html, string $location, string $query, array &$placesByKey, ?callable $logger): string
+    {
+        if ($this->isBlockedPage($html)) {
+            $this->log($logger, 'place.skipped', [
+                'provider' => 'direct',
+                'query' => $query,
+                'url' => $url,
+                'reason' => 'blocked by anti-bot page (captcha)',
+            ]);
+
+            return 'skipped';
+        }
+
         $data = $this->parsePlacePage($html, $url, $location);
 
         if (($data['website'] ?? null) === null || trim((string) $data['website']) === '') {
+            $this->log($logger, 'place.skipped', [
+                'provider' => 'direct',
+                'query' => $query,
+                'url' => $url,
+                'reason' => 'no website or fetch failed',
+            ]);
+
+            return 'skipped';
+        }
+
+        $place = Place::fromArray($data);
+
+        $key = $place->businessId !== ''
+            ? $place->businessId
+            : md5($place->title.'|'.$place->address.'|'.$place->website);
+
+        if (isset($placesByKey[$key])) {
+            $this->log($logger, 'place.duplicate', [
+                'provider' => 'direct',
+                'query' => $query,
+                'title' => $place->title,
+                'businessId' => $place->businessId,
+            ]);
+
+            return 'duplicate';
+        }
+
+        $placesByKey[$key] = $place;
+        $this->log($logger, 'place.saved', [
+            'provider' => 'direct',
+            'query' => $query,
+            'title' => $place->title,
+            'website' => $place->website,
+            'totalSaved' => count($placesByKey),
+            'place' => $place,
+        ]);
+
+        return 'saved';
+    }
+
+    /**
+     * Retry a URL through the optional bypass proxy (see BypassProxyClient) -
+     * only ever called after a direct request already failed or was blocked,
+     * never on the normal path. Returns null (never throws) whenever the
+     * bypass proxy isn't configured, can't be reached/started, or itself
+     * fails, so callers can always fall back to treating the URL as skipped.
+     */
+    private function fetchViaBypassProxyOrNull(string $url, ?callable $logger): ?string
+    {
+        if ($this->bypassProxy === null) {
             return null;
         }
 
-        return Place::fromArray($data);
+        if (! $this->bypassProxy->ensureStarted()) {
+            return null;
+        }
+
+        try {
+            $this->log($logger, 'bypass_proxy.used', [
+                'provider' => 'direct',
+                'url' => $url,
+            ]);
+
+            return $this->bypassProxy->fetch($url)['body'];
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function isBlockedPage(string $html): bool
+    {
+        $normalized = mb_strtolower($html, 'UTF-8');
+
+        foreach (self::BLOCK_MARKERS as $marker) {
+            if (str_contains($normalized, $marker)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -322,14 +529,11 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
     {
         $candidates = [];
 
-        foreach (['url', 'sameAs'] as $key) {
-            $value = $jsonLd[$key] ?? null;
-            if (is_string($value)) {
-                $candidates[] = $value;
-            }
-            if (is_array($value)) {
-                $candidates = array_merge($candidates, array_filter($value, 'is_string'));
-            }
+        // Only `url` represents the organization's own site. `sameAs` is schema.org's
+        // field for OTHER profiles (VK, Instagram, ...) and must not be treated as a website.
+        $value = $jsonLd['url'] ?? null;
+        if (is_string($value)) {
+            $candidates[] = $value;
         }
 
         preg_match_all('~"(?:website|site|url|href)"\s*:\s*"((?:https?:)?//[^"\\\\]+)"~u', str_replace('\\/', '/', $html), $matches);
@@ -343,7 +547,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
                 continue;
             }
 
-            if (str_contains($host, 'yandex.') || str_contains($host, 'ya.ru') || str_contains($host, 'yastatic.net')) {
+            if ($this->isNonWebsiteHost($host)) {
                 continue;
             }
 
@@ -351,6 +555,17 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         }
 
         return null;
+    }
+
+    private function isNonWebsiteHost(string $host): bool
+    {
+        foreach (self::NON_WEBSITE_HOST_FRAGMENTS as $fragment) {
+            if (str_contains($host, $fragment)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

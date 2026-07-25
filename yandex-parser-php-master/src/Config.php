@@ -18,5 +18,7 @@ final readonly class Config
         public string $apiToken,
         public string $baseUrl = 'https://api.apify.com/v2',
         public int $timeout = 900,
+        public int $maxRetries = 3,
+        public ?string $proxy = null,
     ) {}
 }

@@ -9,7 +9,9 @@ it('has correct default values', function () {
 
     expect($config->apiToken)->toBe('test_api_token')
         ->and($config->baseUrl)->toBe('https://api.apify.com/v2')
-        ->and($config->timeout)->toBe(900);
+        ->and($config->timeout)->toBe(900)
+        ->and($config->maxRetries)->toBe(3)
+        ->and($config->proxy)->toBeNull();
 });
 
 it('accepts custom values', function () {
@@ -17,11 +19,15 @@ it('accepts custom values', function () {
         apiToken: 'custom_token',
         baseUrl: 'https://custom.api.com/v2',
         timeout: 600,
+        maxRetries: 5,
+        proxy: 'http://user:pass@host:8080',
     );
 
     expect($config->apiToken)->toBe('custom_token')
         ->and($config->baseUrl)->toBe('https://custom.api.com/v2')
-        ->and($config->timeout)->toBe(600);
+        ->and($config->timeout)->toBe(600)
+        ->and($config->maxRetries)->toBe(5)
+        ->and($config->proxy)->toBe('http://user:pass@host:8080');
 });
 
 it('has hardcoded actor IDs', function () {

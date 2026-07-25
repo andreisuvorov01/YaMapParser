@@ -10,6 +10,7 @@ use YandexParser\Config;
 use YandexParser\DTO\Place;
 use YandexParser\Language;
 use YandexParser\Provider\ApifyPlacesProvider;
+use YandexParser\Provider\BypassProxyClient;
 use YandexParser\Provider\DirectYandexMapsProvider;
 use YandexParser\Provider\PlacesWithWebsitesProvider;
 
@@ -72,6 +73,30 @@ final class CollectWebsitesCommand
         }
 
         $output = (string) $options['output'];
+        $statePath = $output.'.progress.json';
+
+        if ((bool) $options['resume']) {
+            $completed = $this->loadCompletedQueries($statePath);
+            $remaining = array_values(array_filter($queries, static fn (string $q): bool => ! in_array($q, $completed, true)));
+
+            if (count($remaining) < count($queries)) {
+                $this->stdout(sprintf(
+                    "Resuming: skipping %d of %d queries already completed (state: %s)\n",
+                    count($queries) - count($remaining),
+                    count($queries),
+                    $statePath,
+                ));
+            }
+
+            $queries = $remaining;
+        }
+
+        if (count($queries) === 0) {
+            $this->stdout("Nothing to do: all queries are already marked completed. Delete {$statePath} to start over.\n");
+
+            return 0;
+        }
+
         $providerName = (string) $options['provider'];
         $maxResultsPerQuery = (int) $options['max-results-per-query'];
         $language = $this->resolveLanguage((string) $options['language']);
@@ -81,6 +106,7 @@ final class CollectWebsitesCommand
         /** @var array<string, Place> $checkpointPlacesByKey */
         $checkpointPlacesByKey = [];
         $lastCheckpointAt = time();
+        $completedQueries = $this->loadCompletedQueries($statePath);
         $logger = $this->makeLogger(
             quiet: (bool) $options['quiet'],
             checkpointPath: $output,
@@ -88,6 +114,8 @@ final class CollectWebsitesCommand
             checkpointEvery: $checkpointEvery,
             checkpointPlacesByKey: $checkpointPlacesByKey,
             lastCheckpointAt: $lastCheckpointAt,
+            statePath: $statePath,
+            completedQueries: $completedQueries,
         );
 
         if ($provider === null) {
@@ -158,6 +186,12 @@ final class CollectWebsitesCommand
             'filter-rating' => null,
             'max-photos' => 0,
             'max-posts' => 0,
+            'proxy' => getenv('YANDEX_PARSER_PROXY') ?: null,
+            'concurrency' => 1,
+            'bypass-proxy-url' => getenv('YANDEX_PARSER_BYPASS_PROXY_URL') ?: null,
+            'bypass-proxy-dir' => getenv('YANDEX_PARSER_BYPASS_PROXY_DIR') ?: null,
+            'bypass-proxy-python' => getenv('YANDEX_PARSER_BYPASS_PROXY_PYTHON') ?: 'python',
+            'resume' => false,
             'quiet' => false,
             'help' => false,
         ];
@@ -175,6 +209,12 @@ final class CollectWebsitesCommand
                 continue;
             }
 
+            if ($argument === '--resume') {
+                $options['resume'] = true;
+
+                continue;
+            }
+
             if (! str_starts_with($argument, '--')) {
                 continue;
             }
@@ -186,7 +226,7 @@ final class CollectWebsitesCommand
             }
         }
 
-        foreach (['max-results-per-query', 'timeout', 'delay-ms', 'max-pages-per-query', 'checkpoint-interval', 'checkpoint-every', 'max-photos', 'max-posts'] as $integerOption) {
+        foreach (['max-results-per-query', 'timeout', 'delay-ms', 'max-pages-per-query', 'checkpoint-interval', 'checkpoint-every', 'max-photos', 'max-posts', 'concurrency'] as $integerOption) {
             $options[$integerOption] = max(0, (int) $options[$integerOption]);
         }
 
@@ -205,6 +245,10 @@ final class CollectWebsitesCommand
             $lines = @file($options['queries-file'], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
             if (is_array($lines)) {
                 $queries = $lines;
+
+                if (isset($queries[0])) {
+                    $queries[0] = preg_replace('/^\xEF\xBB\xBF/', '', $queries[0]) ?? $queries[0];
+                }
             }
         }
 
@@ -213,7 +257,10 @@ final class CollectWebsitesCommand
         }
 
         $queries = array_map(static fn (string $query): string => trim($query), $queries);
-        $queries = array_filter($queries, static fn (string $query): bool => $query !== '');
+        $queries = array_filter(
+            $queries,
+            static fn (string $query): bool => $query !== '' && ! str_starts_with($query, '#'),
+        );
 
         return array_values(array_unique($queries));
     }
@@ -238,9 +285,11 @@ final class CollectWebsitesCommand
                 return null;
             }
 
+            $proxy = is_string($options['proxy']) && $options['proxy'] !== '' ? $options['proxy'] : null;
+
             return new ApifyPlacesProvider(new Client(
                 apiToken: $token,
-                config: new Config(apiToken: $token, timeout: (int) $options['timeout']),
+                config: new Config(apiToken: $token, timeout: (int) $options['timeout'], proxy: $proxy),
             ));
         }
 
@@ -251,12 +300,46 @@ final class CollectWebsitesCommand
                 return null;
             }
 
-            return new DirectYandexMapsProvider(delayMs: (int) $options['delay-ms']);
+            $proxy = is_string($options['proxy']) && $options['proxy'] !== '' ? $options['proxy'] : null;
+
+            return new DirectYandexMapsProvider(
+                delayMs: (int) $options['delay-ms'],
+                proxy: $proxy,
+                concurrency: max(1, (int) $options['concurrency']),
+                bypassProxy: $this->makeBypassProxyClient($options),
+            );
         }
 
         $this->stderr("Unknown provider: {$providerName}. Use apify or direct.\n");
 
         return null;
+    }
+
+    /**
+     * Builds a BypassProxyClient only if the user opted in via --bypass-proxy-url
+     * and/or --bypass-proxy-dir. With neither set, the direct provider gets no
+     * bypass proxy at all and behaves exactly as before this feature existed.
+     *
+     * @param  array<string, bool|int|string|null>  $options
+     */
+    private function makeBypassProxyClient(array $options): ?BypassProxyClient
+    {
+        $url = is_string($options['bypass-proxy-url']) && $options['bypass-proxy-url'] !== ''
+            ? $options['bypass-proxy-url']
+            : null;
+        $dir = is_string($options['bypass-proxy-dir']) && $options['bypass-proxy-dir'] !== ''
+            ? $options['bypass-proxy-dir']
+            : null;
+
+        if ($url === null && $dir === null) {
+            return null;
+        }
+
+        return new BypassProxyClient(
+            baseUrl: $url ?? 'http://127.0.0.1:8765',
+            startDir: $dir,
+            pythonExecutable: (string) $options['bypass-proxy-python'],
+        );
     }
 
     private function resolveLanguage(string $language): Language
@@ -284,8 +367,45 @@ final class CollectWebsitesCommand
     }
 
     /**
+     * @return string[]
+     */
+    private function loadCompletedQueries(string $path): array
+    {
+        if (! is_file($path)) {
+            return [];
+        }
+
+        $contents = @file_get_contents($path);
+        if ($contents === false) {
+            return [];
+        }
+
+        $decoded = json_decode($contents, true);
+        if (! is_array($decoded)) {
+            return [];
+        }
+
+        return array_values(array_filter($decoded, 'is_string'));
+    }
+
+    /**
+     * @param  string[]  $completedQueries
+     */
+    private function markQueryCompleted(string $path, string $query, array &$completedQueries): void
+    {
+        if (in_array($query, $completedQueries, true)) {
+            return;
+        }
+
+        $completedQueries[] = $query;
+
+        @file_put_contents($path, json_encode(array_values($completedQueries), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) ?: '[]');
+    }
+
+    /**
      * @param  array<string, Place>  $checkpointPlacesByKey
-     * @return callable(string, array<string, mixed>): void|null
+     * @param  string[]  $completedQueries
+     * @return callable(string, array<string, mixed>): void
      */
     private function makeLogger(
         bool $quiet,
@@ -294,11 +414,9 @@ final class CollectWebsitesCommand
         int $checkpointEvery,
         array &$checkpointPlacesByKey,
         int &$lastCheckpointAt,
-    ): ?callable {
-        if ($quiet && $checkpointInterval <= 0 && $checkpointEvery <= 0) {
-            return null;
-        }
-
+        string $statePath,
+        array &$completedQueries,
+    ): callable {
         return function (string $event, array $context) use (
             $quiet,
             $checkpointPath,
@@ -306,9 +424,15 @@ final class CollectWebsitesCommand
             $checkpointEvery,
             &$checkpointPlacesByKey,
             &$lastCheckpointAt,
+            $statePath,
+            &$completedQueries,
         ): void {
             if (! $quiet) {
                 $this->stderr($this->formatLogLine($event, $context)."\n");
+            }
+
+            if ($event === 'query.finished' && is_string($context['query'] ?? null)) {
+                $this->markQueryCompleted($statePath, $context['query'], $completedQueries);
             }
 
             if ($event !== 'place.saved' || ! ($context['place'] ?? null) instanceof Place) {
@@ -407,6 +531,17 @@ final class CollectWebsitesCommand
                 (string) ($context['url'] ?? ''),
                 (string) ($context['reason'] ?? 'unknown reason'),
             ),
+            'query.blocked' => sprintf(
+                '[%s] [direct] blocked by anti-bot/captcha page on "%s" (page %d) — stopping pagination for this query',
+                $time,
+                (string) ($context['query'] ?? ''),
+                (int) ($context['page'] ?? 0),
+            ),
+            'bypass_proxy.used' => sprintf(
+                '[%s] [direct] retrying via bypass proxy: %s',
+                $time,
+                (string) ($context['url'] ?? ''),
+            ),
             'place.duplicate' => sprintf(
                 '[%s] [%s] duplicate skipped: %s (%s)',
                 $time,
@@ -493,16 +628,31 @@ Options:
   --max-pages-per-query=50            Direct provider page safety limit when max-results-per-query=0. Default: 50
   --checkpoint-interval=30            Rewrite CSV checkpoint at least every N seconds; 0 disables time checkpoints. Default: 30
   --checkpoint-every=25               Rewrite CSV checkpoint every N saved rows; 0 disables row checkpoints. Default: 25
+  --proxy=http://user:pass@host:port  Optional HTTP/HTTPS proxy used for API/scraping requests. Defaults to YANDEX_PARSER_PROXY env variable.
+  --concurrency=1                     Direct provider: number of organization pages fetched in parallel. Default: 1 (sequential)
+  --bypass-proxy-url=URL              Direct provider: base URL of a running bypass-proxy service (see below). Only used as a
+                                       fallback after a direct request fails/is blocked. Defaults to YANDEX_PARSER_BYPASS_PROXY_URL.
+  --bypass-proxy-dir=PATH             Direct provider: project directory containing proxy_server.py; if the service at
+                                       --bypass-proxy-url isn't reachable, it's launched from here on first need (best-effort).
+                                       Defaults to YANDEX_PARSER_BYPASS_PROXY_DIR.
+  --bypass-proxy-python=python        Python executable used to launch proxy_server.py. Defaults to YANDEX_PARSER_BYPASS_PROXY_PYTHON.
+  --resume                            Skip queries already marked completed in <output>.progress.json from a previous run.
   --quiet, -q                         Disable progress logs and print only final status/errors.
   --help                              Show this help.
 
 Examples:
   APIFY_TOKEN=apify_api_xxx php bin/yandex-parser collect:websites --location=Краснодар --output=krasnodar.csv
   php bin/yandex-parser collect:websites --provider=direct --location=Краснодар --queries="ресторан,кафе,стоматология" --output=krasnodar.csv
+  php bin/yandex-parser collect:websites --queries-file=examples/queries-krasnodar.txt --output=krasnodar.csv --resume
 
 Notes:
   The direct provider is best-effort HTML parsing of public Yandex Maps pages. It can break if Yandex changes markup,
   can be rate-limited, and should be used only where it complies with applicable terms and laws.
+  Every run writes <output>.progress.json, listing queries that finished successfully. Pass --resume to skip them on
+  the next run (e.g. after a crash or rate limit); delete that file to force a full re-run.
+  Lines starting with "#" in --queries-file are treated as comments and skipped.
+  --bypass-proxy-* is entirely optional and never used for normal requests - the direct provider only calls it after
+  a request already failed or came back as a Yandex anti-bot/captcha page, so it adds no overhead when nothing is blocked.
 HELP);
     }
 

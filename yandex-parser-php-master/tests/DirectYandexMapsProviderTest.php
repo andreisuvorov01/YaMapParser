@@ -5,7 +5,9 @@ declare(strict_types=1);
 use GuzzleHttp\Client as HttpClient;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
+use YandexParser\Provider\BypassProxyClient;
 use YandexParser\Provider\DirectYandexMapsProvider;
 
 function makeDirectYandexMapsProviderParser(): DirectYandexMapsProvider
@@ -178,4 +180,251 @@ it('loads direct result pages until an empty page when query limit is unlimited'
         ->and($pageEvents[0][1]['newUrlsOnPage'])->toBe(1)
         ->and($pageEvents[1][1]['newUrlsOnPage'])->toBe(1)
         ->and($pageEvents[2][1]['newUrlsOnPage'])->toBe(0);
+});
+
+it('does not treat JSON-LD sameAs social profiles as the website', function () {
+    $provider = makeDirectYandexMapsProviderParser();
+
+    $data = $provider->parsePlacePage(<<<'HTML'
+<html>
+<head>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "LocalBusiness",
+  "name": "Кафе Пример",
+  "sameAs": ["https://vk.com/cafe_example", "https://ok.ru/cafe_example"]
+}
+</script>
+</head>
+<body></body>
+</html>
+HTML, 'https://yandex.ru/maps/org/cafe_example/1111111111/', 'Краснодар');
+
+    expect($data['website'])->toBeNull();
+});
+
+it('still extracts the JSON-LD url as website when sameAs also lists social profiles', function () {
+    $provider = makeDirectYandexMapsProviderParser();
+
+    $data = $provider->parsePlacePage(<<<'HTML'
+<html>
+<head>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "LocalBusiness",
+  "name": "Кафе Пример",
+  "url": "https://cafe-example.ru",
+  "sameAs": ["https://vk.com/cafe_example"]
+}
+</script>
+</head>
+<body></body>
+</html>
+HTML, 'https://yandex.ru/maps/org/cafe_example/1111111111/', 'Краснодар');
+
+    expect($data['website'])->toBe('https://cafe-example.ru');
+});
+
+it('skips a vk.com match from the regex fallback and returns no website when nothing else is found', function () {
+    $provider = makeDirectYandexMapsProviderParser();
+
+    $data = $provider->parsePlacePage(
+        '<html><body><script>{"href":"https://vk.com/cafe_example"}</script></body></html>',
+        'https://yandex.ru/maps/org/cafe_example/1111111111/',
+        'Краснодар',
+    );
+
+    expect($data['website'])->toBeNull();
+});
+
+it('stops paginating and logs a blocked event on anti-bot captcha pages', function () {
+    $mock = new MockHandler([
+        new Response(200, [], '<html><body>Please wait... showCaptcha({"key":"1"})</body></html>'),
+    ]);
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => HandlerStack::create($mock),
+        ]),
+        delayMs: 0,
+    );
+    $events = [];
+
+    $places = $provider->collect(
+        queries: ['кафе'],
+        location: 'Краснодар',
+        maxResultsPerQuery: 5,
+        logger: static function (string $event, array $context) use (&$events): void {
+            $events[] = [$event, $context];
+        },
+    );
+
+    expect($places)->toHaveCount(0)
+        ->and(array_column($events, 0))->toContain('query.blocked');
+});
+
+function makeMockedBypassProxy(array $responses, array &$history): BypassProxyClient
+{
+    $mock = new MockHandler($responses);
+    $stack = HandlerStack::create($mock);
+    $stack->push(Middleware::history($history));
+
+    $http = new HttpClient([
+        'base_uri' => 'http://127.0.0.1:8765/',
+        'handler' => $stack,
+    ]);
+
+    return new BypassProxyClient(http: $http);
+}
+
+it('falls back to the bypass proxy when a place page is blocked by anti-bot', function () {
+    $mainMock = new MockHandler([
+        new Response(200, [], '<a href="/maps/org/blocked_place/9988776655/">Blocked Place</a>'),
+        new Response(200, [], '<html><body>showCaptcha({"key":"1"})</body></html>'),
+    ]);
+
+    $bypassHistory = [];
+    $bypassProxy = makeMockedBypassProxy([
+        new Response(200, [], '{"ok":true}'),
+        new Response(200, [], json_encode([
+            'status' => 200,
+            'headers' => [],
+            'body' => base64_encode('<script>{"website":"https:\/\/unblocked.example.ru","address":"Addr"}</script><title>Unblocked</title>'),
+        ], JSON_THROW_ON_ERROR)),
+    ], $bypassHistory);
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => HandlerStack::create($mainMock),
+        ]),
+        delayMs: 0,
+        bypassProxy: $bypassProxy,
+    );
+    $events = [];
+
+    $places = $provider->collect(
+        queries: ['кафе'],
+        location: 'Краснодар',
+        maxResultsPerQuery: 1,
+        logger: static function (string $event, array $context) use (&$events): void {
+            $events[] = [$event, $context];
+        },
+    );
+
+    expect($places)->toHaveCount(1)
+        ->and($places[0]->website)->toBe('https://unblocked.example.ru')
+        ->and(array_column($events, 0))->toContain('bypass_proxy.used')
+        ->and($bypassHistory)->toHaveCount(2);
+});
+
+it('falls back to the bypass proxy when the search results page is blocked', function () {
+    $mainMock = new MockHandler([
+        new Response(200, [], '<html><body>showCaptcha({"key":"1"})</body></html>'),
+        new Response(200, [], '<script>{"website":"https:\/\/place.example.ru"}</script><title>Place</title>'),
+    ]);
+
+    $bypassHistory = [];
+    $bypassProxy = makeMockedBypassProxy([
+        new Response(200, [], '{"ok":true}'),
+        new Response(200, [], json_encode([
+            'status' => 200,
+            'headers' => [],
+            'body' => base64_encode('<a href="/maps/org/unblocked_place/1231231234/">Unblocked Place</a>'),
+        ], JSON_THROW_ON_ERROR)),
+    ], $bypassHistory);
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => HandlerStack::create($mainMock),
+        ]),
+        delayMs: 0,
+        bypassProxy: $bypassProxy,
+    );
+    $events = [];
+
+    $places = $provider->collect(
+        queries: ['кафе'],
+        location: 'Краснодар',
+        maxResultsPerQuery: 1,
+        logger: static function (string $event, array $context) use (&$events): void {
+            $events[] = [$event, $context];
+        },
+    );
+
+    expect($places)->toHaveCount(1)
+        ->and($places[0]->website)->toBe('https://place.example.ru')
+        ->and(array_column($events, 0))->toContain('bypass_proxy.used')
+        ->and($bypassHistory)->toHaveCount(2);
+});
+
+it('falls back to the bypass proxy when a place page request errors out', function () {
+    $mainMock = new MockHandler([
+        new Response(200, [], '<a href="/maps/org/errored_place/5544332211/">Errored Place</a>'),
+        new Response(500, [], 'server error'),
+    ]);
+
+    $bypassHistory = [];
+    $bypassProxy = makeMockedBypassProxy([
+        new Response(200, [], '{"ok":true}'),
+        new Response(200, [], json_encode([
+            'status' => 200,
+            'headers' => [],
+            'body' => base64_encode('<script>{"website":"https:\/\/recovered.example.ru"}</script><title>Recovered</title>'),
+        ], JSON_THROW_ON_ERROR)),
+    ], $bypassHistory);
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => HandlerStack::create($mainMock),
+        ]),
+        delayMs: 0,
+        bypassProxy: $bypassProxy,
+    );
+
+    $places = $provider->collect(
+        queries: ['кафе'],
+        location: 'Краснодар',
+        maxResultsPerQuery: 1,
+    );
+
+    expect($places)->toHaveCount(1)
+        ->and($places[0]->website)->toBe('https://recovered.example.ru')
+        ->and($bypassHistory)->toHaveCount(2);
+});
+
+it('fetches organization pages concurrently when concurrency is greater than one', function () {
+    $mock = new MockHandler([
+        new Response(200, [], '<a href="/maps/org/place_one/111111/">One</a><a href="/maps/org/place_two/222222/">Two</a>'),
+        new Response(200, [], '<html>No more places</html>'),
+        new Response(200, [], '<script>{"website":"https:\/\/one.example.ru","address":"Addr 1"}</script><title>One</title>'),
+        new Response(200, [], '<script>{"website":"https:\/\/two.example.ru","address":"Addr 2"}</script><title>Two</title>'),
+    ]);
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => HandlerStack::create($mock),
+        ]),
+        delayMs: 0,
+        concurrency: 2,
+    );
+
+    $places = $provider->collect(
+        queries: ['кафе'],
+        location: 'Краснодар',
+        maxResultsPerQuery: 0,
+        options: ['maxPagesPerQuery' => 5],
+    );
+
+    $websites = array_map(static fn ($place): ?string => $place->website, $places);
+
+    expect($places)->toHaveCount(2)
+        ->and($websites)->toContain('https://one.example.ru')
+        ->and($websites)->toContain('https://two.example.ru');
 });
