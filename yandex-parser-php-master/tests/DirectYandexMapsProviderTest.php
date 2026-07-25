@@ -435,6 +435,79 @@ it('falls back to the bypass proxy when a place page request errors out', functi
         ->and($bypassHistory)->toHaveCount(2);
 });
 
+it('does not abort the whole run when a search page request fails mid-pagination', function () {
+    $mock = new MockHandler([
+        new Response(200, [], '<a href="/maps/org/place_one/111111/">One</a>'),
+        new Response(500, [], 'server error'),
+        new Response(200, [], '<script>{"website":"https:\/\/one.example.ru"}</script><title>One</title>'),
+        new Response(200, [], '<a href="/maps/org/place_two/222222/">Two</a>'),
+        new Response(200, [], '<html>No more places</html>'),
+        new Response(200, [], '<script>{"website":"https:\/\/two.example.ru"}</script><title>Two</title>'),
+    ]);
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => HandlerStack::create($mock),
+        ]),
+        delayMs: 0,
+    );
+    $events = [];
+
+    $places = $provider->collect(
+        queries: ['кафе', 'бар'],
+        location: 'Москва',
+        maxResultsPerQuery: 0,
+        options: ['maxPagesPerQuery' => 5],
+        logger: static function (string $event, array $context) use (&$events): void {
+            $events[] = [$event, $context];
+        },
+    );
+
+    $websites = array_map(static fn ($place): ?string => $place->website, $places);
+
+    expect($places)->toHaveCount(2)
+        ->and($websites)->toContain('https://one.example.ru')
+        ->and($websites)->toContain('https://two.example.ru')
+        ->and(array_column($events, 0))->toContain('query.error')
+        ->and(array_column($events, 0))->toContain('query.finished');
+});
+
+it('deduplicates same-organization alternate-domain urls during discovery to avoid repeat fetches', function () {
+    // Real Yandex Maps org pages carry <link rel="canonical"/"alternate"> variants of the
+    // SAME organization on yandex.ru/.com/.kz/... - without business-id-based dedup, each
+    // one is (wrongly) treated as a distinct search result and fetched separately.
+    $mock = new MockHandler([
+        new Response(200, [], implode('', [
+            '<link rel="canonical" href="https://yandex.ru/maps/org/restoran_moskva/1183998015/">',
+            '<link rel="alternate" href="https://yandex.com/maps/org/restoran_moskva/1183998015/" hreflang="en">',
+            '<link rel="alternate" href="https://yandex.kz/maps/org/restoran_moskva/1183998015/" hreflang="kk">',
+        ])),
+        new Response(200, [], '<html>No more places</html>'),
+        new Response(200, [], '<script>{"website":"https:\/\/example.ru"}</script><title>One</title>'),
+    ]);
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => HandlerStack::create($mock),
+        ]),
+        delayMs: 0,
+    );
+
+    // Only 3 responses are queued above (2 search pages + 1 place fetch). If the alternate
+    // domains weren't deduplicated, the pool would try to fetch 3 place pages and this
+    // would fail with an empty mock queue instead of asserting the wrong place count.
+    $places = $provider->collect(
+        queries: ['ресторан'],
+        location: 'Москва',
+        maxResultsPerQuery: 0,
+        options: ['maxPagesPerQuery' => 5],
+    );
+
+    expect($places)->toHaveCount(1);
+});
+
 it('fetches organization pages concurrently when concurrency is greater than one', function () {
     $mock = new MockHandler([
         new Response(200, [], '<a href="/maps/org/place_one/111111/">One</a><a href="/maps/org/place_two/222222/">Two</a>'),

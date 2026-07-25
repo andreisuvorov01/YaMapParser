@@ -11,7 +11,6 @@ use GuzzleHttp\Pool;
 use GuzzleHttp\Psr7\Request;
 use Psr\Http\Message\ResponseInterface;
 use YandexParser\DTO\Place;
-use YandexParser\Exception\ApiException;
 use YandexParser\Language;
 
 /**
@@ -123,8 +122,6 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
      * @param  array<string, mixed>  $options
      * @param  callable(string, array<string, mixed>): void|null  $logger
      * @return Place[]
-     *
-     * @throws ApiException
      */
     public function collect(
         array $queries,
@@ -173,8 +170,6 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
 
     /**
      * @return string[]
-     *
-     * @throws ApiException
      */
     private function findOrganizationUrls(
         string $query,
@@ -185,6 +180,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
     ): array {
         $urls = [];
         $seenUrls = [];
+        $seenBusinessIds = [];
         $unlimited = $maxResults <= 0;
 
         for ($page = 1; $page <= $maxPages; $page++) {
@@ -203,7 +199,17 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
                 $body = $this->fetchViaBypassProxyOrNull($absoluteUrl, $logger);
 
                 if ($body === null) {
-                    throw new ApiException('Direct Yandex Maps search request failed: '.$e->getMessage(), 0, $e);
+                    // A single flaky page must not abort the whole (possibly hundreds of
+                    // queries long) run - keep whatever URLs this query already found and
+                    // move on, same as an anti-bot block below.
+                    $this->log($logger, 'query.error', [
+                        'provider' => 'direct',
+                        'query' => $query,
+                        'page' => $page,
+                        'message' => $e->getMessage(),
+                    ]);
+
+                    break;
                 }
             }
 
@@ -232,6 +238,21 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
                 }
 
                 $seenUrls[$url] = true;
+
+                // Yandex Maps org pages carry <link rel="alternate"> variants of the same
+                // organization on yandex.ru/.com/.kz/... - extractOrganizationUrls() picks
+                // those up as if they were distinct search results, wasting a fetch per
+                // domain variant for what dedupes down to one organization anyway. Skipping
+                // repeat business IDs here catches that before it costs a request.
+                $businessId = $this->extractBusinessId($url);
+                if ($businessId !== null) {
+                    if (isset($seenBusinessIds[$businessId])) {
+                        continue;
+                    }
+
+                    $seenBusinessIds[$businessId] = true;
+                }
+
                 $urls[] = $url;
                 $newOnPage++;
 

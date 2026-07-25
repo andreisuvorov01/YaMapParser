@@ -542,6 +542,13 @@ final class CollectWebsitesCommand
                 $time,
                 (string) ($context['url'] ?? ''),
             ),
+            'query.error' => sprintf(
+                '[%s] [direct] request failed on "%s" (page %d): %s — stopping pagination for this query',
+                $time,
+                (string) ($context['query'] ?? ''),
+                (int) ($context['page'] ?? 0),
+                (string) ($context['message'] ?? ''),
+            ),
             'place.duplicate' => sprintf(
                 '[%s] [%s] duplicate skipped: %s (%s)',
                 $time,
