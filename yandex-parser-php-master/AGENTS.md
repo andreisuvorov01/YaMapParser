@@ -71,6 +71,21 @@ tests/
   for social profiles) is never used as a candidate, and both it and the regex HTML fallback are filtered through
   `NON_WEBSITE_HOST_FRAGMENTS` (vk.com, instagram.com, t.me, ...) so a social/messenger link is never returned as
   "the website" instead of the real company site (or instead of no website at all)
+- `extractWebsite()`'s primary source is the page's own `"urls":[...]` JSON array (the organization's real site);
+  `extractPhones()`'s primary source is `"phones":[{"number":...}]`. Both replaced earlier page-wide regexes that
+  matched ad banners (`profilePromo`), cross-reference "sources" (Avito/2GIS/Restoran.ru/...), and effectively
+  arbitrary digit runs (SVG path data, IDs, coordinates) - on real pages those produced the same wrong website for
+  every organization, or hundreds of false-positive "phone numbers" per page. `extractRatingData()` similarly reads
+  the dedicated `"ratingData":{...}` object for rating/ratingsCount/reviewCount
+- `findOrganizationUrls()` resolves known Russian cities (`KNOWN_CITY_GEO_IDS`, verified against live Maps - do not
+  reuse `MarketRegion`'s IDs here, several are wrong for Maps/right only for Market) to a geo-scoped search URL
+  (`/maps/{geoId}/.../search/{text}/`) instead of free text; free-text search on `"<rubric> <city>"` can exact-match
+  an unrelated place literally named that way instead of listing the rubric in that city. Unknown locations fall
+  back to the previous free-text search, so this only ever narrows behavior for the 16 listed cities
+- The search-page request retries once (`SEARCH_PAGE_MAX_RETRIES`) before falling back to the bypass proxy/giving up
+  on that query, absorbing transient connection errors that previously could stop pagination after one hiccup;
+  dedup during URL discovery is now by business ID (not exact URL string), since Yandex serves the same org's page
+  under multiple `<link rel="alternate">` domains (yandex.ru/.com/.kz/...) that used to count as separate results
 - `Provider\BypassProxyClient` is an optional fallback for `DirectYandexMapsProvider`: it's only ever consulted
   after a direct request already failed or came back as a blocked/CAPTCHA page (never on the normal path), talks
   over HTTP to a separately-run proxy service (`POST /fetch`, `GET /health`), and can best-effort spawn that

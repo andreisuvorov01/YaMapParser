@@ -86,11 +86,12 @@ it('parses fallback website and address fields without regex warnings', function
 window.__INITIAL_STATE__ = {
     "website":"https:\/\/www.service-example.ru\/contacts",
     "address":"Краснодар, Северная, 10",
-    "coordinates":[38.976,45.044]
+    "coordinates":[38.976,45.044],
+    "phones":[{"number":"+7 861 555-44-33","type":"phone","value":"+78615554433"}]
 };
 </script>
 </head>
-<body>+7 861 555-44-33</body>
+<body></body>
 </html>
 HTML, 'https://yandex.ru/maps/org/krasnodar_servis/2233445566/', 'Краснодар');
 
@@ -264,6 +265,59 @@ it('finds no website when the "urls" array is empty and only ads/sources are pre
     expect($data['website'])->toBeNull();
 });
 
+it('extracts phone numbers from the "phones" array and ignores page-wide numeric noise', function () {
+    $provider = makeDirectYandexMapsProviderParser();
+
+    // Modeled on a real Yandex Maps org page: hundreds of digit-heavy strings (SVG path
+    // data, coordinates, tracking IDs) surround the real "phones" array elsewhere on the
+    // page. A page-wide "any long digit sequence" regex previously matched all of that -
+    // this asserts only the organization's own numbers, from its own "phones" array, come back.
+    $data = $provider->parsePlacePage(
+        '<html><body><script>'
+        .'{"svgPath":"M0 .348-.036.509-.098.625.685.116 1.16.334 1.568.218.407.538.727.945.945",'
+        .'"appmetricaId":"748922429992101554","photoId":"2a0000019234a1b2c3d4e5f6",'
+        .'"phones":[{"number":"+7 (985) 260-54-44","type":"phone","value":"+79852605444","info":"Инфо"},'
+        .'{"number":"+7 (495) 650-54-44","type":"phone","value":"+74956505444"}]}'
+        .'</script></body></html>',
+        'https://yandex.ru/maps/org/rybny_bazar/1070354797/',
+        'Москва',
+    );
+
+    expect($data['phones'])->toBe(['+7 (985) 260-54-44', '+7 (495) 650-54-44'])
+        ->and($data['phones'])->not->toContain('748922429992101554')
+        ->and($data['phones'])->not->toContain('2a0000019234a1b2c3d4e5f6');
+});
+
+it('extracts rating, ratings count and review count from "ratingData"', function () {
+    $provider = makeDirectYandexMapsProviderParser();
+
+    $data = $provider->parsePlacePage(
+        '<html><body><script>'
+        .'{"ratingData":{"ratingCount":5480,"ratingValue":4.9,"reviewCount":2624}}'
+        .'</script></body></html>',
+        'https://yandex.ru/maps/org/rybny_bazar/1070354797/',
+        'Москва',
+    );
+
+    expect($data['rating'])->toBe(4.9)
+        ->and($data['ratingsCount'])->toBe(5480)
+        ->and($data['reviewCount'])->toBe(2624);
+});
+
+it('returns no rating fields when "ratingData" is absent', function () {
+    $provider = makeDirectYandexMapsProviderParser();
+
+    $data = $provider->parsePlacePage(
+        '<html><body></body></html>',
+        'https://yandex.ru/maps/org/no_rating_example/1000000002/',
+        'Москва',
+    );
+
+    expect($data['rating'])->toBeNull()
+        ->and($data['ratingsCount'])->toBeNull()
+        ->and($data['reviewCount'])->toBeNull();
+});
+
 it('skips a vk.com match from the regex fallback and returns no website when nothing else is found', function () {
     $provider = makeDirectYandexMapsProviderParser();
 
@@ -435,10 +489,64 @@ it('falls back to the bypass proxy when a place page request errors out', functi
         ->and($bypassHistory)->toHaveCount(2);
 });
 
+it('uses a geo-scoped search URL for known Russian cities instead of free text', function () {
+    $mock = new MockHandler([
+        new Response(200, [], '<html>No results</html>'),
+    ]);
+    $history = [];
+    $stack = HandlerStack::create($mock);
+    $stack->push(Middleware::history($history));
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => $stack,
+        ]),
+        delayMs: 0,
+    );
+
+    $provider->collect(queries: ['ресторан'], location: 'Москва', maxResultsPerQuery: 5);
+
+    expect($history)->toHaveCount(1);
+
+    $uri = $history[0]['request']->getUri();
+
+    expect(rawurldecode($uri->getPath()))->toBe('/maps/213/city/search/ресторан/')
+        ->and($uri->getQuery())->toBe('');
+});
+
+it('falls back to free-text search for locations without a known geoId', function () {
+    $mock = new MockHandler([
+        new Response(200, [], '<html>No results</html>'),
+    ]);
+    $history = [];
+    $stack = HandlerStack::create($mock);
+    $stack->push(Middleware::history($history));
+
+    $provider = new DirectYandexMapsProvider(
+        http: new HttpClient([
+            'base_uri' => 'https://yandex.ru',
+            'handler' => $stack,
+        ]),
+        delayMs: 0,
+    );
+
+    $provider->collect(queries: ['restaurant'], location: 'Milan, Italy', maxResultsPerQuery: 5);
+
+    expect($history)->toHaveCount(1);
+
+    $uri = $history[0]['request']->getUri();
+    parse_str($uri->getQuery(), $queryParams);
+
+    expect($uri->getPath())->toBe('/maps/')
+        ->and($queryParams['text'])->toBe('restaurant Milan, Italy');
+});
+
 it('does not abort the whole run when a search page request fails mid-pagination', function () {
     $mock = new MockHandler([
         new Response(200, [], '<a href="/maps/org/place_one/111111/">One</a>'),
         new Response(500, [], 'server error'),
+        new Response(500, [], 'server error (retry also fails)'),
         new Response(200, [], '<script>{"website":"https:\/\/one.example.ru"}</script><title>One</title>'),
         new Response(200, [], '<a href="/maps/org/place_two/222222/">Two</a>'),
         new Response(200, [], '<html>No more places</html>'),
@@ -451,6 +559,7 @@ it('does not abort the whole run when a search page request fails mid-pagination
             'handler' => HandlerStack::create($mock),
         ]),
         delayMs: 0,
+        sleeper: static function (int $ms): void {},
     );
     $events = [];
 

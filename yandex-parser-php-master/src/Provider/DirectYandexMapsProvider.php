@@ -39,6 +39,57 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
     ];
 
     /**
+     * Yandex Maps geobase region IDs for major Russian cities, keyed by lowercased name.
+     * Verified directly against https://yandex.ru/maps/{id}/x/search/... (the <title>
+     * of each ID's search results names the expected city) - these do NOT match
+     * MarketRegion's IDs, which are a separate Yandex Market numbering and are wrong
+     * for several of these same cities on Maps (e.g. Market's Perm=47 is Nizhny
+     * Novgorod on Maps; Market's Ufa=61 doesn't resolve on Maps at all).
+     *
+     * When the requested location matches one of these, search uses a geo-scoped URL
+     * instead of free text. This matters because free text ("<rubric> <city>") can
+     * accidentally exact-match an unrelated place literally named that way (e.g.
+     * searching "ресторан Москва" can resolve to a single restaurant named "Москва"
+     * in a completely different city) instead of listing the rubric in that city.
+     */
+    private const KNOWN_CITY_GEO_IDS = [
+        'москва' => '213',
+        'moscow' => '213',
+        'санкт-петербург' => '2',
+        'спб' => '2',
+        'saint petersburg' => '2',
+        'st petersburg' => '2',
+        'екатеринбург' => '54',
+        'yekaterinburg' => '54',
+        'казань' => '43',
+        'kazan' => '43',
+        'новосибирск' => '65',
+        'novosibirsk' => '65',
+        'нижний новгород' => '47',
+        'nizhny novgorod' => '47',
+        'самара' => '51',
+        'samara' => '51',
+        'ростов-на-дону' => '39',
+        'rostov-on-don' => '39',
+        'краснодар' => '35',
+        'krasnodar' => '35',
+        'челябинск' => '56',
+        'chelyabinsk' => '56',
+        'уфа' => '172',
+        'ufa' => '172',
+        'пермь' => '50',
+        'perm' => '50',
+        'воронеж' => '193',
+        'voronezh' => '193',
+        'волгоград' => '38',
+        'volgograd' => '38',
+        'красноярск' => '62',
+        'krasnoyarsk' => '62',
+        'омск' => '66',
+        'omsk' => '66',
+    ];
+
+    /**
      * Social/messenger/aggregator domains that show up in Yandex Maps card data
      * (JSON-LD `sameAs`, share buttons, etc.) but are never the organization's
      * own website. Without this, extractWebsite() can pick a VK/Instagram/etc.
@@ -87,7 +138,19 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         'tripadvisor.',
     ];
 
+    /**
+     * A single retry (2 attempts total) for the search-page request before falling back to
+     * the bypass proxy or giving up on this query - absorbs the kind of transient connection
+     * blip (reset, truncated response) that would otherwise stop pagination after just one hiccup.
+     */
+    private const SEARCH_PAGE_MAX_RETRIES = 1;
+
+    private const RETRY_DELAY_MS = 500;
+
     private ClientInterface $http;
+
+    /** @var \Closure(int): void */
+    private \Closure $sleeper;
 
     public function __construct(
         ?ClientInterface $http = null,
@@ -95,6 +158,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         ?string $proxy = null,
         private readonly int $concurrency = 1,
         private readonly ?BypassProxyClient $bypassProxy = null,
+        ?\Closure $sleeper = null,
     ) {
         if ($http !== null) {
             $this->http = $http;
@@ -114,6 +178,35 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
             }
 
             $this->http = new HttpClient($httpOptions);
+        }
+
+        $this->sleeper = $sleeper ?? static function (int $ms): void {
+            if ($ms > 0) {
+                usleep($ms * 1000);
+            }
+        };
+    }
+
+    /**
+     * @param  array<string, mixed>  $options
+     *
+     * @throws GuzzleException
+     */
+    private function requestWithRetry(string $method, string $path, array $options): ResponseInterface
+    {
+        $attempt = 0;
+
+        while (true) {
+            try {
+                return $this->http->request($method, $path, $options);
+            } catch (GuzzleException $e) {
+                if ($attempt >= self::SEARCH_PAGE_MAX_RETRIES) {
+                    throw $e;
+                }
+
+                $attempt++;
+                ($this->sleeper)(self::RETRY_DELAY_MS * $attempt);
+            }
         }
     }
 
@@ -183,15 +276,25 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         $seenBusinessIds = [];
         $unlimited = $maxResults <= 0;
 
+        $geoId = $this->resolveCityGeoId($location);
+
         for ($page = 1; $page <= $maxPages; $page++) {
-            $queryParams = ['text' => trim($query.' '.$location)];
-            if ($page > 1) {
-                $queryParams['page'] = $page;
+            if ($geoId !== null) {
+                // Geo-scoped search: reliably lists the rubric within that city instead of
+                // risking an exact-name match on unrelated free text (see KNOWN_CITY_GEO_IDS).
+                $path = '/maps/'.$geoId.'/city/search/'.rawurlencode($query).'/';
+                $queryParams = $page > 1 ? ['page' => $page] : [];
+            } else {
+                $path = '/maps/';
+                $queryParams = ['text' => trim($query.' '.$location)];
+                if ($page > 1) {
+                    $queryParams['page'] = $page;
+                }
             }
-            $absoluteUrl = 'https://yandex.ru/maps/?'.http_build_query($queryParams);
+            $absoluteUrl = 'https://yandex.ru'.$path.($queryParams !== [] ? '?'.http_build_query($queryParams) : '');
 
             try {
-                $response = $this->http->request('GET', '/maps/', [
+                $response = $this->requestWithRetry('GET', $path, [
                     'query' => $queryParams,
                 ]);
                 $body = (string) $response->getBody();
@@ -276,6 +379,14 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         }
 
         return $urls;
+    }
+
+    /**
+     * @see KNOWN_CITY_GEO_IDS
+     */
+    private function resolveCityGeoId(string $location): ?string
+    {
+        return self::KNOWN_CITY_GEO_IDS[mb_strtolower(trim($location), 'UTF-8')] ?? null;
     }
 
     /**
@@ -487,6 +598,7 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
         $businessId = $this->extractBusinessId($url) ?? $this->extractBusinessId($html) ?? '';
         $website = $this->extractWebsite($jsonLd, $html);
         $coordinates = $this->extractCoordinates($jsonLd, $html);
+        $rating = $this->extractRatingData($html);
 
         return [
             'businessId' => $businessId,
@@ -498,7 +610,42 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
             'website' => $website,
             'longitude' => $coordinates['longitude'] ?? null,
             'latitude' => $coordinates['latitude'] ?? null,
+            'rating' => $rating['rating'] ?? null,
+            'ratingsCount' => $rating['ratingsCount'] ?? null,
+            'reviewCount' => $rating['reviewCount'] ?? null,
         ];
+    }
+
+    /**
+     * The organization's rating/review counters live in a dedicated "ratingData" object
+     * in the page's embedded JSON state - e.g. "ratingData":{"ratingCount":123,
+     * "ratingValue":4.7,"reviewCount":45}. Extracted independently of field order since
+     * that's the only assumption real page samples reliably support.
+     *
+     * @return array{rating?: float, ratingsCount?: int, reviewCount?: int}
+     */
+    private function extractRatingData(string $html): array
+    {
+        if (preg_match('~"ratingData"\s*:\s*(\{[^}]*\})~u', $html, $blockMatch) !== 1) {
+            return [];
+        }
+
+        $block = $blockMatch[1];
+        $result = [];
+
+        if (preg_match('~"ratingValue"\s*:\s*([\d.]+)~', $block, $match) === 1) {
+            $result['rating'] = (float) $match[1];
+        }
+
+        if (preg_match('~"ratingCount"\s*:\s*(\d+)~', $block, $match) === 1) {
+            $result['ratingsCount'] = (int) $match[1];
+        }
+
+        if (preg_match('~"reviewCount"\s*:\s*(\d+)~', $block, $match) === 1) {
+            $result['reviewCount'] = (int) $match[1];
+        }
+
+        return $result;
     }
 
     /**
@@ -680,8 +827,17 @@ final class DirectYandexMapsProvider implements PlacesWithWebsitesProvider
             $phones = array_merge($phones, array_filter($telephone, 'is_string'));
         }
 
-        preg_match_all('~(?:tel:)?(\+?\d[\d\s().-]{7,}\d)~u', $html, $matches);
-        $phones = array_merge($phones, $matches[1]);
+        // The organization's own phone numbers live in a dedicated "phones" ARRAY of
+        // objects, e.g. "phones":[{"number":"+7 (985) 260-54-44","type":"phone",
+        // "value":"+79852605444"}, ...]. A page-wide "any long digit sequence" regex is
+        // unusable on real pages: SVG path data, coordinates, prices and IDs alone produce
+        // hundreds of false-positive "phone numbers" per page - any one of which could end
+        // up as the single phone number kept for a business. Scoping to the "phones" array
+        // first, then reading "number" only from within it, avoids that entirely.
+        if (preg_match('~"phones"\s*:\s*(\[[^\]]*\])~u', str_replace('\\/', '/', $html), $phonesBlock) === 1) {
+            preg_match_all('~"number"\s*:\s*"([^"]+)"~u', $phonesBlock[1], $numberMatches);
+            $phones = array_merge($phones, $numberMatches[1]);
+        }
 
         return array_values(array_unique(array_map('trim', $phones)));
     }
