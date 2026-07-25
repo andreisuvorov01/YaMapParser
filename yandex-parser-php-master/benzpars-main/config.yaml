@@ -1,0 +1,10 @@
+user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+stealth_plugins:
+  - stealth
+  - undetectable
+tls_fingerprint: chrome_130
+padding_size: 256
+locale_consistency: true
+audio_context_emulated: true
+headers: {}
+cookies: []

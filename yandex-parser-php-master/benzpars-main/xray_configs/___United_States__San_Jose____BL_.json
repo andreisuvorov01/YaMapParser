@@ -1,0 +1,69 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "port": 10808,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "x4g-production-1456.up.railway.app",
+            "port": 443,
+            "users": [
+              {
+                "id": "f4cbfbbc-3bb7-8b19-3801-0a0efabef936",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "x4g-production-1456.up.railway.app",
+          "alpn": [
+            "http/1.1"
+          ],
+          "fingerprint": "ios"
+        },
+        "wsSettings": {
+          "path": "/ws/f4cbfbbc-3bb7-8b19-3801-0a0efabef936",
+          "headers": {
+            "Host": "x4g-production-1456.up.railway.app"
+          }
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "geoip:private"
+        ],
+        "outboundTag": "direct"
+      }
+    ]
+  }
+}

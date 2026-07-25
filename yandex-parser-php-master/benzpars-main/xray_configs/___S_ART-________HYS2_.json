@@ -1,0 +1,72 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "port": 10808,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "udp": true,
+        "auth": "noauth",
+        "allowTransparent": false
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "hysteria",
+      "settings": {
+        "address": "4jgnuhop2a3.ru.mediavitrina.com",
+        "port": 30443,
+        "version": 2
+      },
+      "streamSettings": {
+        "network": "hysteria",
+        "hysteriaSettings": {
+          "version": 2,
+          "auth": "2ccb5c2c-7f05-40e3-8425-ee2011ba1383"
+        },
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "content.ru.mediavitrina.com",
+          "fingerprint": "firefox",
+          "alpn": [
+            "h3"
+          ]
+        },
+        "finalmask": {
+          "quicParams": {
+            "debug": false,
+            "bbrProfile": "standard",
+            "congestion": "bbr",
+            "maxIdleTimeout": 30,
+            "keepAlivePeriod": 15,
+            "maxIncomingStreams": 1024,
+            "maxStreamReceiveWindow": 16777216,
+            "initStreamReceiveWindow": 8388608,
+            "maxConnectionReceiveWindow": 41943040,
+            "initConnectionReceiveWindow": 20971520
+          }
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "port": "0-53"
+      }
+    ],
+    "domainStrategy": "AsIs"
+  }
+}

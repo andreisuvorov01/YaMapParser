@@ -1,0 +1,18 @@
+{
+  "name": "pars",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "proxy": "python proxy_server.py",
+    "sync:gdebenz": "node sync-gdebenz.mjs",
+    "sync:gdebenz:comments": "node sync-gdebenz-comments.mjs",
+    "sync:gdebenz:comments:turbo": "node sync-gdebenz-comments.mjs --all --turbo",
+    "sync:benzinstatus": "node sync-benzinstatus.mjs",
+    "sync:avito": "node sync-avito.mjs"
+  },
+  "dependencies": {
+    "jsdom": "^29.1.1",
+    "pg": "^8.22.0"
+  }
+}

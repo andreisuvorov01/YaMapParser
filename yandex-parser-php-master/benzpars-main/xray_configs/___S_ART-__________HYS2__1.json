@@ -1,0 +1,72 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "port": 10808,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "udp": true,
+        "auth": "noauth",
+        "allowTransparent": false
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "hysteria",
+      "settings": {
+        "address": "mg34-mdd-27asdh.de.deepl-cdn.com",
+        "port": 30443,
+        "version": 2
+      },
+      "streamSettings": {
+        "network": "hysteria",
+        "hysteriaSettings": {
+          "version": 2,
+          "auth": "82ca4774-d205-470b-b263-df2da5278aeb"
+        },
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "de.deepl-cdn.com",
+          "fingerprint": "randomized",
+          "alpn": [
+            "h3"
+          ]
+        },
+        "finalmask": {
+          "quicParams": {
+            "debug": false,
+            "bbrProfile": "standard",
+            "congestion": "bbr",
+            "maxIdleTimeout": 30,
+            "keepAlivePeriod": 15,
+            "maxIncomingStreams": 1024,
+            "maxStreamReceiveWindow": 16777216,
+            "initStreamReceiveWindow": 8388608,
+            "maxConnectionReceiveWindow": 41943040,
+            "initConnectionReceiveWindow": 20971520
+          }
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "port": "0-53"
+      }
+    ]
+  }
+}

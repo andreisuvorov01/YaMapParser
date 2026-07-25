@@ -1,0 +1,27 @@
+INFO:     Started server process [9128]
+INFO:     Waiting for application startup.
+2026-07-06 14:22:12,950 INFO XRay конфигов найдено: 49
+2026-07-06 14:22:13,266 INFO \u2705 XRay [1/49] ____11_LTE______________ (pid=15548)
+2026-07-06 14:22:13,267 INFO Запускаем тест конфигов (bench)...
+2026-07-06 14:22:13,267 INFO Сервер http://127.0.0.1:8765 | XRay: ____11_LTE______________ | throttle=100мс
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8765 (Press CTRL+C to quit)
+2026-07-06 14:22:14,281 ERROR Ошибка bench при старте: cannot access local variable 'TEST_URL' where it is not associated with a value
+2026-07-06 14:27:00,079 INFO HTTP Request: POST https://httpbin.org/post "HTTP/2 503 Service Unavailable"
+2026-07-06 14:27:00,080 INFO bomb #0 HTTP 503 3850ms (HTTP/2)
+2026-07-06 14:27:00,241 INFO HTTP Request: POST https://httpbin.org/post "HTTP/2 503 Service Unavailable"
+2026-07-06 14:27:00,241 INFO HTTP Request: POST https://httpbin.org/post "HTTP/2 503 Service Unavailable"
+2026-07-06 14:27:00,242 INFO bomb #1 HTTP 503 4005ms (HTTP/2)
+2026-07-06 14:27:00,242 INFO bomb #2 HTTP 503 4004ms (HTTP/2)
+2026-07-06 14:27:00,243 INFO bomb done: 3/3 ok, total 4313ms, body=16KB
+2026-07-06 14:27:27,460 INFO HTTP Request: POST https://postman-echo.com/post "HTTP/2 200 OK"
+2026-07-06 14:27:27,555 INFO HTTP Request: POST https://postman-echo.com/post "HTTP/2 200 OK"
+2026-07-06 14:27:27,588 INFO HTTP Request: POST https://postman-echo.com/post "HTTP/2 200 OK"
+2026-07-06 14:27:27,669 INFO bomb #0 HTTP 200 4858ms (HTTP/2)
+2026-07-06 14:27:27,670 INFO HTTP Request: POST https://postman-echo.com/post "HTTP/2 200 OK"
+2026-07-06 14:27:27,828 INFO bomb #1 HTTP 200 5016ms (HTTP/2)
+2026-07-06 14:27:27,856 INFO HTTP Request: POST https://postman-echo.com/post "HTTP/2 200 OK"
+2026-07-06 14:27:27,924 INFO bomb #2 HTTP 200 5112ms (HTTP/2)
+2026-07-06 14:27:27,989 INFO bomb #3 HTTP 200 5176ms (HTTP/2)
+2026-07-06 14:27:28,034 INFO bomb #4 HTTP 200 5220ms (HTTP/2)
+2026-07-06 14:27:28,034 INFO bomb done: 5/5 ok, total 5419ms, body=32KB

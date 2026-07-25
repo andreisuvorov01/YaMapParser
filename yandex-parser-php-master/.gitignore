@@ -12,4 +12,3 @@
 # Separate local project (Python/Node, own xray proxy credentials, node_modules,
 # xray.exe binary) used at runtime as an optional bypass proxy - never commit it
 # here, it doesn't belong in this Composer package's repo.
-/benzpars-main/

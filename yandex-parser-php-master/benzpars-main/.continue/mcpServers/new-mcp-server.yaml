@@ -1,0 +1,16 @@
+name: MCP Docker
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: MCP Docker
+    command: docker
+    args:
+      - mcp
+      - gateway
+      - run
+      - --profile
+      - ai_coding
+    env:
+      LOCALAPPDATA: "C:\\Users\\ИЛЬЯ\\AppData\\Local"
+      ProgramData: "C:\\ProgramData"
+      ProgramFiles: "C:\\Program Files"
